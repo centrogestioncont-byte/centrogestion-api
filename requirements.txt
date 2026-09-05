@@ -1,0 +1,2 @@
+# Sin dependencias por ahora. Este archivo existe para que Railway
+# detecte el proyecto como Python.

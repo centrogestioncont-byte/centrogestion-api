@@ -1,0 +1,13 @@
+{
+  "name": "centrogestion-api",
+  "version": "0.1.0",
+  "private": true,
+  "description": "API intermediaria entre Centro de Gestion y MongoDB",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

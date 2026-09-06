@@ -490,9 +490,10 @@ class Manejador(BaseHTTPRequestHandler):
                 return self._responder(400, {"ok": False, "error": "faltan datos"})
             actual = str(cuerpo.get("actual", ""))
             nueva = str(cuerpo.get("nueva", ""))
-            if len(nueva) < 8:
+            if len(nueva) < LARGO_MINIMO_CLAVE:
                 return self._responder(400, {
-                    "ok": False, "error": "la clave nueva debe tener al menos 8 caracteres",
+                    "ok": False,
+                    "error": "la clave nueva debe tener al menos %d caracteres" % LARGO_MINIMO_CLAVE,
                 })
             try:
                 usuario = usuario_de_sesion(self._testigo())

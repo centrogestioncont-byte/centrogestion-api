@@ -219,6 +219,14 @@ def usuario_publico(usuario):
 COLECCIONES_FUERA = ["sesiones"]
 CAMPOS_FUERA = {"usuarios": ["clave"]}
 
+# Colecciones que SI se respaldan pero NUNCA se restauran.
+# "usuarios" entra aca por una razon concreta: el respaldo sale sin el campo
+# de la clave, y los _id salen convertidos a texto. Restaurarla dejaria
+# usuarios que no pueden entrar y sesiones apuntando a un id que ya no
+# coincide: te quedas afuera del ambiente. Los usuarios se crean al arrancar
+# o desde la pantalla de gestion, no desde un archivo.
+COLECCIONES_NO_RESTAURAR = ["usuarios"]
+
 
 def armar_respaldo(solo_resumen=False):
     base = obtener_base()
@@ -259,14 +267,18 @@ def restaurar_respaldo(archivo):
     base = obtener_base()
     datos = (archivo or {}).get("datos") or {}
     resultado = {}
+    salteadas = []
     for nombre, docs in datos.items():
-        if nombre in COLECCIONES_FUERA or not isinstance(docs, list):
+        if not isinstance(docs, list):
+            continue
+        if nombre in COLECCIONES_FUERA or nombre in COLECCIONES_NO_RESTAURAR:
+            salteadas.append(nombre)
             continue
         base[nombre].delete_many({})
         if docs:
             base[nombre].insert_many(docs)
         resultado[nombre] = len(docs)
-    return resultado
+    return resultado, salteadas
 
 
 # ── Servidor ─────────────────────────────────────────────────────────────
@@ -469,10 +481,14 @@ class Manejador(BaseHTTPRequestHandler):
             if not isinstance(archivo, dict) or not archivo.get("datos"):
                 return self._responder(400, {"ok": False, "error": "archivo de respaldo invalido"})
             try:
-                resultado = restaurar_respaldo(archivo)
+                resultado, salteadas = restaurar_respaldo(archivo)
             except PyMongoError:
                 return self._responder(503, {"ok": False, "error": "base no disponible"})
-            return self._responder(200, {"ok": True, "restaurado": resultado})
+            return self._responder(200, {
+                "ok": True,
+                "restaurado": resultado,
+                "salteadas": salteadas,
+            })
 
         return self._responder(404, {"ok": False, "error": "ruta no encontrada"})
 

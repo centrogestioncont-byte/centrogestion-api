@@ -20,6 +20,8 @@ import time
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+from bson import ObjectId
+from bson.errors import InvalidId
 from pymongo import ASCENDING, MongoClient
 from pymongo.errors import PyMongoError
 
@@ -209,6 +211,49 @@ def usuario_publico(usuario):
     }
 
 
+# ── Gestion de usuarios ──────────────────────────────────────────────────
+# Los roles son los mismos que ya usa la app; el servidor no inventa
+# ninguno nuevo. "lector" es el Supervisor: ve todo y no modifica.
+ROLES_VALIDOS = ["admin", "brl", "vzla", "eeuu", "lector"]
+LARGO_MINIMO_CLAVE = 8
+
+
+def _oid(texto):
+    try:
+        return ObjectId(str(texto))
+    except (InvalidId, TypeError):
+        return None
+
+
+def _admins_activos(base, excepto=None):
+    filtro = {"rol": "admin", "activo": True}
+    if excepto is not None:
+        filtro["_id"] = {"$ne": excepto}
+    return base.usuarios.count_documents(filtro)
+
+
+def _cerrar_sesiones_de(base, uid):
+    """Revocacion real: al desactivar o cambiar la clave, las sesiones
+    abiertas de esa persona dejan de servir en el acto."""
+    base.sesiones.delete_many({"usuarioId": uid})
+
+
+def listar_usuarios():
+    base = obtener_base()
+    salida = []
+    for u in base.usuarios.find({}).sort("nombre", ASCENDING):
+        salida.append({
+            "id": str(u["_id"]),
+            "correo": u.get("correo", ""),
+            "nombre": u.get("nombre", ""),
+            "rol": u.get("rol", "lector"),
+            "permisos": u.get("permisos", {}),
+            "activo": u.get("activo", True),
+            "creado": u.get("creado"),
+        })
+    return salida
+
+
 # ── Respaldo de la base ──────────────────────────────────────────────────
 # Colecciones que NUNCA salen en un respaldo:
 #   sesiones -> son testigos vivos; el archivo terminaria siendo una llave
@@ -356,6 +401,15 @@ class Manejador(BaseHTTPRequestHandler):
             if not usuario:
                 return self._responder(401, {"ok": False, "error": "sesion vencida"})
             return self._responder(200, {"ok": True, "usuario": usuario_publico(usuario)})
+        if ruta == "/usuarios":
+            try:
+                usuario, error = self._admin()
+                if error:
+                    return self._responder(*error)
+                return self._responder(200, {"ok": True, "usuarios": listar_usuarios()})
+            except PyMongoError:
+                return self._responder(503, {"ok": False, "error": "base no disponible"})
+
         if ruta in ("/respaldo", "/respaldo/resumen"):
             try:
                 usuario, error = self._admin()
@@ -460,6 +514,80 @@ class Manejador(BaseHTTPRequestHandler):
                 return self._responder(503, {"ok": False, "error": "base no disponible"})
             return self._responder(200, {"ok": True})
 
+        if ruta == "/usuarios":
+            try:
+                yo, error = self._admin()
+                if error:
+                    return self._responder(*error)
+                if not isinstance(cuerpo, dict):
+                    return self._responder(400, {"ok": False, "error": "faltan datos"})
+                correo = str(cuerpo.get("correo", "")).strip().lower()
+                nombre = str(cuerpo.get("nombre", "")).strip()
+                rol = str(cuerpo.get("rol", "")).strip()
+                clave = str(cuerpo.get("clave", ""))
+                if not correo or "@" not in correo:
+                    return self._responder(400, {"ok": False, "error": "correo invalido"})
+                if not nombre:
+                    return self._responder(400, {"ok": False, "error": "falta el nombre"})
+                if rol not in ROLES_VALIDOS:
+                    return self._responder(400, {"ok": False, "error": "rol invalido"})
+                if len(clave) < LARGO_MINIMO_CLAVE:
+                    return self._responder(400, {
+                        "ok": False,
+                        "error": "la clave debe tener al menos %d caracteres" % LARGO_MINIMO_CLAVE,
+                    })
+                base = obtener_base()
+                if base.usuarios.find_one({"correo": correo}):
+                    return self._responder(409, {"ok": False, "error": "ya existe un usuario con ese correo"})
+                permisos = cuerpo.get("permisos")
+                if not isinstance(permisos, dict):
+                    permisos = {"editar": rol != "lector"}
+                nuevo = {
+                    "correo": correo,
+                    "nombre": nombre,
+                    "rol": rol,
+                    "permisos": permisos,
+                    "activo": True,
+                    "clave": cifrar_clave(clave),
+                    "creado": ahora(),
+                    "creadoPor": yo.get("correo", ""),
+                }
+                res = base.usuarios.insert_one(nuevo)
+            except PyMongoError:
+                return self._responder(503, {"ok": False, "error": "base no disponible"})
+            return self._responder(201, {"ok": True, "id": str(res.inserted_id)})
+
+        if ruta.startswith("/usuarios/") and ruta.endswith("/clave"):
+            try:
+                yo, error = self._admin()
+                if error:
+                    return self._responder(*error)
+                uid = _oid(ruta.split("/")[2])
+                if uid is None:
+                    return self._responder(400, {"ok": False, "error": "id invalido"})
+                nueva = str((cuerpo or {}).get("nueva", ""))
+                if len(nueva) < LARGO_MINIMO_CLAVE:
+                    return self._responder(400, {
+                        "ok": False,
+                        "error": "la clave debe tener al menos %d caracteres" % LARGO_MINIMO_CLAVE,
+                    })
+                base = obtener_base()
+                if not base.usuarios.find_one({"_id": uid}):
+                    return self._responder(404, {"ok": False, "error": "usuario no encontrado"})
+                base.usuarios.update_one(
+                    {"_id": uid},
+                    {"$set": {"clave": cifrar_clave(nueva), "claveCambiada": ahora()}},
+                )
+                # Cambiar la clave cierra las sesiones abiertas de esa persona,
+                # salvo la propia si es uno mismo (para no auto-expulsarse).
+                if uid == yo["_id"]:
+                    base.sesiones.delete_many({"usuarioId": uid, "_id": {"$ne": self._testigo()}})
+                else:
+                    _cerrar_sesiones_de(base, uid)
+            except PyMongoError:
+                return self._responder(503, {"ok": False, "error": "base no disponible"})
+            return self._responder(200, {"ok": True})
+
         if ruta == "/restaurar":
             # Candado: esta ruta NO EXISTE fuera del ambiente de pruebas.
             # Restaurar sobre datos reales es una operacion para hacer a mano,
@@ -489,6 +617,82 @@ class Manejador(BaseHTTPRequestHandler):
                 "restaurado": resultado,
                 "salteadas": salteadas,
             })
+
+        return self._responder(404, {"ok": False, "error": "ruta no encontrada"})
+
+    def do_PUT(self):
+        ruta = self.path.split("?")[0].rstrip("/") or "/"
+        cuerpo = self._leer_json()
+        partes = [p for p in ruta.split("/") if p]
+        if len(partes) == 2 and partes[0] == "usuarios":
+            try:
+                yo, error = self._admin()
+                if error:
+                    return self._responder(*error)
+                uid = _oid(partes[1])
+                if uid is None:
+                    return self._responder(400, {"ok": False, "error": "id invalido"})
+                if not isinstance(cuerpo, dict):
+                    return self._responder(400, {"ok": False, "error": "faltan datos"})
+                base = obtener_base()
+                destino = base.usuarios.find_one({"_id": uid})
+                if not destino:
+                    return self._responder(404, {"ok": False, "error": "usuario no encontrado"})
+
+                cambios = {}
+                if "nombre" in cuerpo:
+                    nombre = str(cuerpo["nombre"]).strip()
+                    if not nombre:
+                        return self._responder(400, {"ok": False, "error": "falta el nombre"})
+                    cambios["nombre"] = nombre
+                if "rol" in cuerpo:
+                    rol = str(cuerpo["rol"]).strip()
+                    if rol not in ROLES_VALIDOS:
+                        return self._responder(400, {"ok": False, "error": "rol invalido"})
+                    # Candado: nadie se quita a si mismo el rol de administrador.
+                    if uid == yo["_id"] and rol != "admin":
+                        return self._responder(400, {
+                            "ok": False,
+                            "error": "no puedes quitarte a ti mismo el rol de administrador",
+                        })
+                    cambios["rol"] = rol
+                if "permisos" in cuerpo and isinstance(cuerpo["permisos"], dict):
+                    cambios["permisos"] = cuerpo["permisos"]
+                if "activo" in cuerpo:
+                    activo = bool(cuerpo["activo"])
+                    # Candado: nadie se desactiva a si mismo.
+                    if uid == yo["_id"] and not activo:
+                        return self._responder(400, {
+                            "ok": False,
+                            "error": "no puedes desactivarte a ti mismo",
+                        })
+                    cambios["activo"] = activo
+                if not cambios:
+                    return self._responder(400, {"ok": False, "error": "nada que cambiar"})
+
+                # Candado: siempre tiene que quedar al menos un admin activo.
+                deja_de_ser_admin = (
+                    (cambios.get("rol", destino.get("rol")) != "admin")
+                    or (cambios.get("activo", destino.get("activo", True)) is False)
+                )
+                if destino.get("rol") == "admin" and destino.get("activo", True) and deja_de_ser_admin:
+                    if _admins_activos(base, excepto=uid) == 0:
+                        return self._responder(400, {
+                            "ok": False,
+                            "error": "debe quedar al menos un administrador activo",
+                        })
+
+                cambios["modificado"] = ahora()
+                base.usuarios.update_one({"_id": uid}, {"$set": cambios})
+                # Desactivar o cambiar de rol cierra las sesiones abiertas.
+                # Si el rol se "cambia" al que ya tenia, no se cierra nada:
+                # guardar sin cambios no deberia echar a nadie.
+                rol_cambio = "rol" in cambios and cambios["rol"] != destino.get("rol")
+                if cambios.get("activo") is False or rol_cambio:
+                    _cerrar_sesiones_de(base, uid)
+            except PyMongoError:
+                return self._responder(503, {"ok": False, "error": "base no disponible"})
+            return self._responder(200, {"ok": True, "cambios": list(cambios.keys())})
 
         return self._responder(404, {"ok": False, "error": "ruta no encontrada"})
 

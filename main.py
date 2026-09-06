@@ -209,6 +209,78 @@ def usuario_publico(usuario):
     }
 
 
+# ── Respaldo de la base ──────────────────────────────────────────────────
+# Colecciones que NUNCA salen en un respaldo:
+#   sesiones -> son testigos vivos; el archivo terminaria siendo una llave
+#               de entrada para cualquiera que lo abra.
+# De "usuarios" se saca el campo de la clave cifrada: el archivo se baja al
+# telefono y se sube a la nube, y ahi no tiene por que viajar. Al restaurar,
+# las claves se vuelven a poner; los datos del negocio no dependen de eso.
+COLECCIONES_FUERA = ["sesiones"]
+CAMPOS_FUERA = {"usuarios": ["clave"]}
+
+# Colecciones que SI se respaldan pero NUNCA se restauran.
+# "usuarios" entra aca por una razon concreta: el respaldo sale sin el campo
+# de la clave, y los _id salen convertidos a texto. Restaurarla dejaria
+# usuarios que no pueden entrar y sesiones apuntando a un id que ya no
+# coincide: te quedas afuera del ambiente. Los usuarios se crean al arrancar
+# o desde la pantalla de gestion, no desde un archivo.
+COLECCIONES_NO_RESTAURAR = ["usuarios"]
+
+
+def armar_respaldo(solo_resumen=False):
+    base = obtener_base()
+    if base is None:
+        return None
+    nombres = [c for c in base.list_collection_names() if c not in COLECCIONES_FUERA]
+    nombres.sort()
+    datos = {}
+    conteo = {}
+    for nombre in nombres:
+        docs = list(base[nombre].find({}))
+        conteo[nombre] = len(docs)
+        if solo_resumen:
+            continue
+        quitar = CAMPOS_FUERA.get(nombre, [])
+        if quitar:
+            for d in docs:
+                for campo in quitar:
+                    d.pop(campo, None)
+        datos[nombre] = docs
+    respaldo = {
+        "_respaldo": {
+            "fecha": ahora().isoformat(),
+            "ambiente": os.environ.get("AMBIENTE", "produccion"),
+            "base": NOMBRE_BASE,
+            "colecciones": conteo,
+            "total": sum(conteo.values()),
+            "sinClaves": True,
+        }
+    }
+    if not solo_resumen:
+        respaldo["datos"] = datos
+    return respaldo
+
+
+def restaurar_respaldo(archivo):
+    """Solo en pruebas. Reemplaza las colecciones que vengan en el archivo."""
+    base = obtener_base()
+    datos = (archivo or {}).get("datos") or {}
+    resultado = {}
+    salteadas = []
+    for nombre, docs in datos.items():
+        if not isinstance(docs, list):
+            continue
+        if nombre in COLECCIONES_FUERA or nombre in COLECCIONES_NO_RESTAURAR:
+            salteadas.append(nombre)
+            continue
+        base[nombre].delete_many({})
+        if docs:
+            base[nombre].insert_many(docs)
+        resultado[nombre] = len(docs)
+    return resultado, salteadas
+
+
 # ── Servidor ─────────────────────────────────────────────────────────────
 class Manejador(BaseHTTPRequestHandler):
     server_version = "centrogestion-api"
@@ -245,6 +317,15 @@ class Manejador(BaseHTTPRequestHandler):
         except Exception:
             return None
 
+    def _admin(self):
+        """Devuelve el usuario si hay sesion valida Y es administrador."""
+        usuario = usuario_de_sesion(self._testigo())
+        if not usuario:
+            return None, (401, {"ok": False, "error": "sesion vencida"})
+        if usuario.get("rol") != "admin":
+            return None, (403, {"ok": False, "error": "solo administradores"})
+        return usuario, None
+
     def _testigo(self):
         cab = self.headers.get("Authorization", "")
         if cab.startswith("Bearer "):
@@ -275,6 +356,31 @@ class Manejador(BaseHTTPRequestHandler):
             if not usuario:
                 return self._responder(401, {"ok": False, "error": "sesion vencida"})
             return self._responder(200, {"ok": True, "usuario": usuario_publico(usuario)})
+        if ruta in ("/respaldo", "/respaldo/resumen"):
+            try:
+                usuario, error = self._admin()
+                if error:
+                    return self._responder(*error)
+                resumen = (ruta == "/respaldo/resumen")
+                respaldo = armar_respaldo(solo_resumen=resumen)
+                if respaldo is None:
+                    return self._responder(503, {"ok": False, "error": "base no disponible"})
+            except PyMongoError:
+                return self._responder(503, {"ok": False, "error": "base no disponible"})
+            if resumen:
+                return self._responder(200, {"ok": True, "resumen": respaldo["_respaldo"]})
+            datos = json.dumps(respaldo, ensure_ascii=False, default=str).encode("utf-8")
+            nombre = "respaldo-%s-%s.json" % (
+                NOMBRE_BASE, ahora().strftime("%Y%m%d-%H%M%S"))
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(datos)))
+            self.send_header("Content-Disposition", 'attachment; filename="%s"' % nombre)
+            self.send_header("Cache-Control", "no-store")
+            self._cors()
+            self.end_headers()
+            return self.wfile.write(datos)
+
         return self._responder(404, {"ok": False, "error": "ruta no encontrada"})
 
     def do_POST(self):
@@ -353,6 +459,36 @@ class Manejador(BaseHTTPRequestHandler):
             except PyMongoError:
                 return self._responder(503, {"ok": False, "error": "base no disponible"})
             return self._responder(200, {"ok": True})
+
+        if ruta == "/restaurar":
+            # Candado: esta ruta NO EXISTE fuera del ambiente de pruebas.
+            # Restaurar sobre datos reales es una operacion para hacer a mano,
+            # mirando lo que se hace, no algo que una ruta pueda disparar sola.
+            if os.environ.get("AMBIENTE", "produccion") != "pruebas":
+                return self._responder(404, {"ok": False, "error": "ruta no encontrada"})
+            try:
+                usuario, error = self._admin()
+                if error:
+                    return self._responder(*error)
+            except PyMongoError:
+                return self._responder(503, {"ok": False, "error": "base no disponible"})
+            if not isinstance(cuerpo, dict) or cuerpo.get("confirmo") != "SI":
+                return self._responder(400, {
+                    "ok": False,
+                    "error": 'falta la confirmacion: mandar "confirmo": "SI"',
+                })
+            archivo = cuerpo.get("archivo")
+            if not isinstance(archivo, dict) or not archivo.get("datos"):
+                return self._responder(400, {"ok": False, "error": "archivo de respaldo invalido"})
+            try:
+                resultado, salteadas = restaurar_respaldo(archivo)
+            except PyMongoError:
+                return self._responder(503, {"ok": False, "error": "base no disponible"})
+            return self._responder(200, {
+                "ok": True,
+                "restaurado": resultado,
+                "salteadas": salteadas,
+            })
 
         return self._responder(404, {"ok": False, "error": "ruta no encontrada"})
 

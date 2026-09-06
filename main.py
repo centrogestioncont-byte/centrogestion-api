@@ -24,9 +24,14 @@ from pymongo import ASCENDING, MongoClient
 from pymongo.errors import PyMongoError
 
 # ── Ajustes ──────────────────────────────────────────────────────────────
+# Sitios autorizados a llamar esta API desde el navegador.
+# Se pueden cambiar sin tocar el codigo: variable ORIGENES en Railway,
+# separados por coma. Si no esta puesta, valen los dos de siempre.
+_ORIGENES_POR_DEFECTO = "https://centrogestion.pages.dev,https://centrogestion-test.pages.dev"
 ORIGENES_PERMITIDOS = [
-    "https://centrogestion.pages.dev",
-    "https://centrogestion-test.pages.dev",
+    o.strip().rstrip("/")
+    for o in os.environ.get("ORIGENES", _ORIGENES_POR_DEFECTO).split(",")
+    if o.strip()
 ]
 
 MONGO_URL = os.environ.get("MONGO_URL", "")
@@ -259,6 +264,7 @@ class Manejador(BaseHTTPRequestHandler):
                 "ok": True,
                 "mensaje": "estoy viva",
                 "hora": ahora().isoformat(),
+                "ambiente": os.environ.get("AMBIENTE", "produccion"),
                 "mongo": estado_mongo(),
             })
         if ruta == "/auth/yo":

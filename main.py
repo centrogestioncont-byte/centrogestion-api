@@ -10,6 +10,7 @@
 #   GET/POST/PUT /clientes              la primera coleccion del negocio
 #   GET/PUT /estado                     TODO el resto del negocio
 #   POST /estado/importar               la carga inicial desde Firebase
+#   GET/POST /auditoria                 quien hizo que y cuando
 #
 # /estado es el reemplazo de Firebase. El navegador manda su bloque, el
 # SERVIDOR fusiona y devuelve el resultado. Antes cada dispositivo fusionaba
@@ -26,6 +27,7 @@ import threading
 import time
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import parse_qs, urlparse
 
 from bson import ObjectId
 from bson.errors import InvalidId
@@ -148,6 +150,8 @@ def preparar_base():
     base.sesiones.create_index([("usuarioId", ASCENDING)])
     # El codigo de cliente es la clave que usan las remesas: unico, sin repetidos.
     base.clientes.create_index([("cod", ASCENDING)], unique=True)
+    # La auditoria se lee siempre ordenada por fecha y se poda por fecha.
+    base[COL_AUDITORIA].create_index([("ts", ASCENDING)])
 
     correo = (os.environ.get("ADMIN_CORREO", "") or "").strip().lower()
     nombre = os.environ.get("ADMIN_NOMBRE", "") or ""
@@ -731,6 +735,64 @@ def contar_estado(estado):
             for k, v in (estado or {}).items() if v is not None}
 
 
+# ── Auditoria ────────────────────────────────────────────────────────────
+# Quien hizo que y cuando. Vivia en un nodo aparte de Firebase; al sacar
+# Firebase se queda sin casa, y es justamente lo que no se puede perder.
+#
+# Se guarda en su propia coleccion y NO dentro de /estado: el estado viaja
+# entero en cada guardado, y meterle un historial que solo crece haria que
+# cada telefono suba megabytes por cada cambio.
+COL_AUDITORIA = "auditoria"
+DIAS_AUDITORIA = 90            # lo que se conserva; el resto se poda solo
+MAX_AUDITORIA = 300            # cuantas entradas devuelve una consulta
+
+
+def anotar_auditoria(usuario, accion, detalle):
+    base = obtener_base()
+    if base is None:
+        return False
+    ahora_ms = int(time.time() * 1000)
+    base[COL_AUDITORIA].insert_one({
+        "ts": ahora_ms,
+        "fecha": cuerpo_fecha_local(ahora_ms),
+        "usuario": usuario.get("nombre") or usuario.get("correo") or "?",
+        "role": usuario.get("rol") or "?",
+        "accion": _texto(accion, 80),
+        "detalle": _texto(detalle, 500),
+    })
+    # Podar lo vencido aprovechando que ya estamos escribiendo. Con el indice
+    # por ts es un borrado por rango, no un recorrido.
+    limite = ahora_ms - DIAS_AUDITORIA * 24 * 60 * 60 * 1000
+    base[COL_AUDITORIA].delete_many({"ts": {"$lt": limite}})
+    return True
+
+
+def cuerpo_fecha_local(ms):
+    """La app muestra la hora de Caracas. Se guarda ya formateada porque es
+    lo unico que se hace con este campo: mostrarlo."""
+    return datetime.fromtimestamp(ms / 1000, timezone(timedelta(hours=-4))).strftime(
+        "%d/%m/%Y, %H:%M:%S")
+
+
+def listar_auditoria(role=None, tipo=None, limite=MAX_AUDITORIA):
+    base = obtener_base()
+    if base is None:
+        return None
+    filtro = {}
+    if role:
+        filtro["role"] = role
+    if tipo:
+        # El front filtra por prefijo: "REMESA" tiene que traer
+        # "REMESA_CREADA" y "REMESA_ELIMINADA".
+        filtro["accion"] = {"$regex": "^" + _escapar_regex(str(tipo))}
+    cursor = base[COL_AUDITORIA].find(filtro, {"_id": 0}).sort("ts", -1).limit(int(limite))
+    return list(cursor)
+
+
+def _escapar_regex(t):
+    return "".join(("\\" + c) if c in ".^$*+?()[]{}|\\" else c for c in t)
+
+
 # ── Respaldo de la base ──────────────────────────────────────────────────
 # Colecciones que NUNCA salen en un respaldo:
 #   sesiones -> son testigos vivos; el archivo terminaria siendo una llave
@@ -949,6 +1011,24 @@ class Manejador(BaseHTTPRequestHandler):
             except PyMongoError:
                 return self._responder(503, {"ok": False, "error": "base no disponible"})
             return self._responder(200, {"ok": True, "conteo": contar_estado(estado), "_ts": ts})
+
+        if ruta == "/auditoria":
+            # Cualquier sesion valida la lee: el Supervisor tiene que poder
+            # revisar quien toco que, y para eso entra.
+            try:
+                usuario, error = self._sesion()
+                if error:
+                    return self._responder(*error)
+                consulta = parse_qs(urlparse(self.path).query)
+                entradas = listar_auditoria(
+                    role=(consulta.get("role") or [""])[0].strip() or None,
+                    tipo=(consulta.get("tipo") or [""])[0].strip() or None,
+                )
+                if entradas is None:
+                    return self._responder(503, {"ok": False, "error": "base no disponible"})
+            except PyMongoError:
+                return self._responder(503, {"ok": False, "error": "base no disponible"})
+            return self._responder(200, {"ok": True, "entradas": entradas})
 
         if ruta in ("/respaldo", "/respaldo/resumen"):
             try:
@@ -1236,6 +1316,24 @@ class Manejador(BaseHTTPRequestHandler):
                 "total": sum(len(v) for v in inicial.values() if isinstance(v, list)),
                 "_ts": ts_nuevo,
             })
+
+        if ruta == "/auditoria":
+            # Anota una accion. Alcanza con tener sesion: el que solo mira
+            # tambien deja rastro cuando entra y cuando sale.
+            try:
+                usuario, error = self._sesion()
+                if error:
+                    return self._responder(*error)
+                if not isinstance(cuerpo, dict) or not str(cuerpo.get("accion", "")).strip():
+                    return self._responder(400, {"ok": False, "error": "falta la accion"})
+                # El usuario y el rol NO se leen del cuerpo: los pone el
+                # servidor a partir de la sesion. Si los mandara el navegador,
+                # cualquiera podria firmar sus actos con el nombre de otro.
+                if not anotar_auditoria(usuario, cuerpo.get("accion"), cuerpo.get("detalle")):
+                    return self._responder(503, {"ok": False, "error": "base no disponible"})
+            except PyMongoError:
+                return self._responder(503, {"ok": False, "error": "base no disponible"})
+            return self._responder(201, {"ok": True})
 
         if ruta == "/restaurar":
             # Candado: esta ruta NO EXISTE fuera del ambiente de pruebas.

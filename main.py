@@ -353,6 +353,12 @@ PODA_CATS = [
     "cuentas", "cuentasCobrar", "egresos", "egresos_personales", "prestamos",
     "compromisos", "traspasos", "deudas_paul", "gananciaExtra", "gastos_socios",
     "gastos_eeuu", "reposiciones", "ajustesSaldo", "pagosSocios",
+    # "capital" entro el 08/09/2026. Faltaba en las dos puntas: el boton de
+    # borrar del navegador anotaba la marca y nadie la aplicaba, asi que la
+    # fila volvia por la fusion desde cualquier otro dispositivo. Tiene que
+    # estar aca Y en _PODA_CATS del front: si solo una punta poda, el
+    # servidor y los telefonos resuelven distinto el mismo conflicto.
+    "capital",
 ]
 
 DATA_KEYS = [

@@ -873,10 +873,33 @@ def armar_respaldo(solo_resumen=False):
     return respaldo
 
 
+# Las colecciones que la aplicacion usa de verdad. Un nombre fuera de esta
+# lista no es una coleccion que este vacia: es un nombre equivocado.
+COLECCIONES_CONOCIDAS = [COL_ESTADO, "clientes", COL_AUDITORIA] + \
+    COLECCIONES_FUERA + COLECCIONES_NO_RESTAURAR
+
+
 def restaurar_respaldo(archivo):
-    """Solo en pruebas. Reemplaza las colecciones que vengan en el archivo."""
+    """Solo en pruebas. Reemplaza las colecciones que vengan en el archivo.
+
+    Devuelve (resultado, salteadas, desconocidas). Si hay desconocidas no
+    escribe NADA: se avisa y se corta.
+
+    Antes cualquier nombre valia. Quien mandaba las claves de la aplicacion
+    —brl, vzla, eeuu— en vez de las colecciones de la base creaba colecciones
+    con esos nombres, que nadie lee, y recibia 200 con "restaurado": {"brl": 1}.
+    O sea: exito informado sin haber restaurado nada. El estado vive en la
+    coleccion "estado", un documento por clave, y quedaba intacto. Costo un
+    rato averiguar por que el conteo no bajaba.
+    """
     base = obtener_base()
     datos = (archivo or {}).get("datos") or {}
+
+    desconocidas = [n for n, docs in datos.items()
+                    if isinstance(docs, list) and n not in COLECCIONES_CONOCIDAS]
+    if desconocidas:
+        return {}, [], sorted(desconocidas)
+
     resultado = {}
     salteadas = []
     for nombre, docs in datos.items():
@@ -889,7 +912,7 @@ def restaurar_respaldo(archivo):
         if docs:
             base[nombre].insert_many(docs)
         resultado[nombre] = len(docs)
-    return resultado, salteadas
+    return resultado, salteadas, desconocidas
 
 
 # ── Servidor ─────────────────────────────────────────────────────────────
@@ -1384,9 +1407,19 @@ class Manejador(BaseHTTPRequestHandler):
             if not isinstance(archivo, dict) or not archivo.get("datos"):
                 return self._responder(400, {"ok": False, "error": "archivo de respaldo invalido"})
             try:
-                resultado, salteadas = restaurar_respaldo(archivo)
+                resultado, salteadas, desconocidas = restaurar_respaldo(archivo)
             except PyMongoError:
                 return self._responder(503, {"ok": False, "error": "base no disponible"})
+            if desconocidas:
+                return self._responder(400, {
+                    "ok": False,
+                    "error": "el archivo nombra colecciones que no existen: " +
+                             ", ".join(desconocidas) +
+                             ". No se restauro nada. El estado del negocio va en "
+                             "la coleccion \"" + COL_ESTADO + "\", un documento "
+                             "por clave: [{\"_id\": \"brl\", \"v\": [...]}, ...]",
+                    "conocidas": sorted(COLECCIONES_CONOCIDAS),
+                })
             return self._responder(200, {
                 "ok": True,
                 "restaurado": resultado,

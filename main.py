@@ -556,6 +556,38 @@ def merge_config_safe(remota, local):
     return salida
 
 
+# ── Restos del acceso por PIN dentro de "config" ─────────────────────────
+# El acceso por PIN se retiro. Los perfiles locales guardaban el nombre y el
+# PIN de cada persona SIN CIFRAR dentro de config, y config viaja al servidor
+# en cada guardado y sale en cada respaldo. Nadie lee ya esas claves, pero
+# mientras sigan ahi los PIN andan en claro por todos los dispositivos.
+#
+# Borrarlas en el navegador no alcanza. merge_config_safe arranca de lo
+# guardado y le AGREGA las claves que el dispositivo no trae: una clave que
+# el servidor todavia tenga vuelve sola en el guardado siguiente. Este es el
+# unico lugar donde el borrado es definitivo.
+CONFIG_PROHIBIDO = ["usuarios", "pins"]
+
+
+def limpiar_config(cfg):
+    """Saca de un objeto config las claves prohibidas. Devuelve cuantas saco."""
+    if not isinstance(cfg, dict):
+        return 0
+    quitadas = 0
+    for k in CONFIG_PROHIBIDO:
+        if k in cfg:
+            del cfg[k]
+            quitadas += 1
+    return quitadas
+
+
+def limpiar_config_de_estado(estado):
+    """Igual, pero recibe el bloque de estado entero."""
+    if not isinstance(estado, dict):
+        return 0
+    return limpiar_config(estado.get("config"))
+
+
 # ── Marcas de borrado ────────────────────────────────────────────────────
 def esta_borrado(marcas, campo, ident):
     lista = (marcas or {}).get(campo)
@@ -698,6 +730,7 @@ def fusionar_estado(entrante, guardado, ts_entrante, ts_guardado):
             salida[k] = entrante[k]
 
     salida["_deletedMerge"] = marcas
+    limpiar_config_de_estado(salida)
     podar_borrados(salida, marcas)
     for k in RENUMERAR:
         if isinstance(salida.get(k), list):
@@ -857,6 +890,13 @@ def armar_respaldo(solo_resumen=False):
             for d in docs:
                 for campo in quitar:
                     d.pop(campo, None)
+        # El respaldo se baja al telefono y se sube a la nube: los restos del
+        # acceso por PIN no tienen por que viajar ahi. En "estado" la config
+        # es un documento suelto, {"_id": "config", "v": {...}}.
+        if nombre == COL_ESTADO:
+            for d in docs:
+                if d.get("_id") == "config":
+                    limpiar_config(d.get("v"))
         datos[nombre] = docs
     respaldo = {
         "_respaldo": {
@@ -908,6 +948,12 @@ def restaurar_respaldo(archivo):
         if nombre in COLECCIONES_FUERA or nombre in COLECCIONES_NO_RESTAURAR:
             salteadas.append(nombre)
             continue
+        # Un respaldo hecho antes de este cambio todavia trae los restos del
+        # acceso por PIN. Restaurarlo los repondria.
+        if nombre == COL_ESTADO:
+            for d in docs:
+                if isinstance(d, dict) and d.get("_id") == "config":
+                    limpiar_config(d.get("v"))
         base[nombre].delete_many({})
         if docs:
             base[nombre].insert_many(docs)
@@ -1044,6 +1090,7 @@ class Manejador(BaseHTTPRequestHandler):
                     estado, ts = leer_estado()
                 if estado is None:
                     return self._responder(503, {"ok": False, "error": "base no disponible"})
+                limpiar_config_de_estado(estado)
             except PyMongoError:
                 return self._responder(503, {"ok": False, "error": "base no disponible"})
             return self._responder(200, {"ok": True, "estado": estado, "_ts": ts})
@@ -1059,6 +1106,7 @@ class Manejador(BaseHTTPRequestHandler):
                     estado, ts = leer_estado()
                 if estado is None:
                     return self._responder(503, {"ok": False, "error": "base no disponible"})
+                limpiar_config_de_estado(estado)
             except PyMongoError:
                 return self._responder(503, {"ok": False, "error": "base no disponible"})
             return self._responder(200, {"ok": True, "conteo": contar_estado(estado), "_ts": ts})

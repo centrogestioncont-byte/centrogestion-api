@@ -48,6 +48,27 @@ ORIGENES_PERMITIDOS = [
 MONGO_URL = os.environ.get("MONGO_URL", "")
 NOMBRE_BASE = os.environ.get("MONGO_DB", "centrogestion")
 
+
+def version_desplegada():
+    """Que codigo esta corriendo, para poder mirarlo desde afuera.
+
+    Railway pone estas variables solo, en cada despliegue. Existe porque ya
+    perdimos un rato con esto: un deploy quedo FAILED, siguio corriendo el
+    contenedor viejo, y desde afuera no habia forma de darse cuenta. Ahora
+    se compara el commit contra el de GitHub y se acaba la discusion.
+
+    Va en /salud, que no pide sesion. Por eso lleva el commit corto y la
+    rama y NO el mensaje del commit: el SHA no le dice nada a quien no
+    tiene acceso al repositorio, y un mensaje como "arreglar el agujero de
+    X" si. Fuera de Railway —corriendo a mano— informa "desconocido", que
+    es la verdad y no una mentira tranquilizadora.
+    """
+    sha = os.environ.get("RAILWAY_GIT_COMMIT_SHA", "") or ""
+    return {
+        "commit": sha[:7] if sha else "desconocido",
+        "rama": os.environ.get("RAILWAY_GIT_BRANCH", "") or "desconocida",
+    }
+
 DIAS_SESION = 30              # vence a los 30 dias SIN USARSE (se renueva sola)
 MAX_INTENTOS = 10             # intentos fallidos seguidos sobre un mismo correo
 BLOQUEO_SEGUNDOS = 15 * 60    # cuanto dura el bloqueo despues de fallar
@@ -956,6 +977,7 @@ class Manejador(BaseHTTPRequestHandler):
                 "mensaje": "estoy viva",
                 "hora": ahora().isoformat(),
                 "ambiente": os.environ.get("AMBIENTE", "produccion"),
+                "version": version_desplegada(),
                 "mongo": estado_mongo(),
             })
         if ruta == "/auth/yo":

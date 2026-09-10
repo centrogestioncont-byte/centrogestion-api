@@ -161,6 +161,12 @@ def ahora():
     return datetime.now(timezone.utc)
 
 
+def ahora_ms():
+    """Milisegundos desde 1970. Es la unidad que usa el motor de fusion:
+    los _mod de todos los registros se comparan entre si como numeros."""
+    return int(time.time() * 1000)
+
+
 def preparar_base():
     """Indices y creacion del primer administrador. Se corre al arrancar."""
     base = obtener_base()
@@ -305,6 +311,26 @@ def _texto(valor, maximo=LARGO_MAXIMO_TEXTO):
     return str(valor if valor is not None else "").strip()[:maximo]
 
 
+def _mod_de_cliente(c):
+    """Cuando fue tocado por ultima vez, en milisegundos.
+
+    Los clientes cargados antes de que la API guardara esta marca no la
+    tienen. Para esos se usa la fecha que el propio _id de Mongo lleva
+    adentro: un ObjectId empieza por su hora de creacion. No es la fecha de
+    la ultima edicion, pero es un numero real, estable entre lecturas y
+    anterior a cualquier edicion posterior —que es todo lo que la fusion
+    necesita para no elegir mal—. Inventar la hora actual en cada lectura
+    seria peor: cada dispositivo creeria haber tocado el registro recien.
+    """
+    m = c.get("_mod")
+    if isinstance(m, (int, float)) and not isinstance(m, bool):
+        return int(m)
+    try:
+        return int(c["_id"].generation_time.timestamp() * 1000)
+    except Exception:
+        return 0
+
+
 def cliente_publico(c):
     return {
         "id": str(c["_id"]),
@@ -315,6 +341,7 @@ def cliente_publico(c):
         "ruta": c.get("ruta", ""),
         "nota": c.get("nota", ""),
         "activo": c.get("activo", True),
+        "_mod": _mod_de_cliente(c),
     }
 
 
@@ -1326,6 +1353,7 @@ class Manejador(BaseHTTPRequestHandler):
                 datos["activo"] = True
                 datos["creado"] = ahora()
                 datos["creadoPor"] = yo.get("correo", "")
+                datos["_mod"] = ahora_ms()
                 res = base.clientes.insert_one(datos)
             except PyMongoError:
                 return self._responder(503, {"ok": False, "error": "base no disponible"})
@@ -1612,6 +1640,7 @@ class Manejador(BaseHTTPRequestHandler):
                 # El "cod" no se toca aunque venga en el cuerpo: las remesas
                 # ya guardadas apuntan a el.
                 datos["modificado"] = ahora()
+                datos["_mod"] = ahora_ms()
                 base.clientes.update_one({"_id": cid}, {"$set": datos})
             except PyMongoError:
                 return self._responder(503, {"ok": False, "error": "base no disponible"})
@@ -1632,7 +1661,8 @@ class Manejador(BaseHTTPRequestHandler):
                     return self._responder(404, {"ok": False, "error": "cliente no encontrado"})
                 base.clientes.update_one(
                     {"_id": cid},
-                    {"$set": {"activo": bool(cuerpo["activo"]), "modificado": ahora()}},
+                    {"$set": {"activo": bool(cuerpo["activo"]),
+                              "modificado": ahora(), "_mod": ahora_ms()}},
                 )
             except PyMongoError:
                 return self._responder(503, {"ok": False, "error": "base no disponible"})

@@ -27,6 +27,19 @@ if "pymongo" not in sys.modules:
     sys.modules["pymongo"] = falso
     sys.modules["pymongo.errors"] = errores
 
+# Y "bson", que main.py importa aparte para los ObjectId. Viene DENTRO de
+# pymongo, asi que aqui pasaba sin que nadie lo notara —esta instalado— y en
+# el CI, que arranca limpio, la prueba ni llegaba a correr. Doblarlo tambien:
+# ObjectId solo se usa para leer y escribir usuarios, no para fusionar.
+if "bson" not in sys.modules:
+    falso_bson = types.ModuleType("bson")
+    falso_bson.ObjectId = str
+    errores_bson = types.ModuleType("bson.errors")
+    errores_bson.InvalidId = Exception
+    falso_bson.errors = errores_bson
+    sys.modules["bson"] = falso_bson
+    sys.modules["bson.errors"] = errores_bson
+
 import main  # noqa: E402
 
 fallos = []

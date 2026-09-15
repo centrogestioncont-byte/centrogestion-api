@@ -10,6 +10,13 @@ if "pymongo" not in sys.modules:
     f = types.ModuleType("pymongo"); f.ASCENDING=1; f.MongoClient=object; f.ReplaceOne=object
     e = types.ModuleType("pymongo.errors"); e.PyMongoError=Exception; f.errors=e
     sys.modules["pymongo"]=f; sys.modules["pymongo.errors"]=e
+# bson viene DENTRO de pymongo, asi que en una maquina donde pymongo esta
+# instalado esto pasa sin que nadie lo note. Donde no lo esta, la prueba ni
+# arranca. Se dobla igual: ObjectId solo se usa para usuarios, no para fusionar.
+if "bson" not in sys.modules:
+    b_ = types.ModuleType("bson"); b_.ObjectId=str
+    be = types.ModuleType("bson.errors"); be.InvalidId=Exception; b_.errors=be
+    sys.modules["bson"]=b_; sys.modules["bson.errors"]=be
 import main
 
 ruta = sys.argv[1] if len(sys.argv) > 1 else None

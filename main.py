@@ -417,7 +417,26 @@ DATA_KEYS = [
     "pagosSocios", "gananciaExtra", "tasasDia", "_tasasDiaMeta", "gastos_socios",
     "compromisos", "_deletedMerge", "histBalance", "histTasas", "histSaldos",
     "ajustesSaldo",
+    # ARREGLO 61 (15/09/2026): "_modCampos" son las marcas de quien toco que
+    # clave de config y cuando. El navegador las manda en cada guardado y
+    # hasta ahora el servidor NO las guardaba —no estaban en esta lista— asi
+    # que las tiraba. Sin marcas, merge_config_safe no podia decidir por
+    # tiempo y usaba "solo relleno lo que esta vacio": un valor de config que
+    # ya existia NO habia forma de cambiarlo desde la app. La apertura, las
+    # comisiones del banco, el % del sueldo, los socios: todo congelado.
+    "_modCampos",
 ]
+
+# ── Claves de config que viajan JUNTAS ───────────────────────────────────
+# La apertura no es un dato, son cinco. Si se deciden por separado puede
+# quedarse la FECHA de un aparato y el MONTO de otro — una apertura que no
+# existio en ninguno, y contra la que mide toda la conciliacion. Es la misma
+# lista que _MERGE_BLOQUES en el navegador: las dos puntas tienen que
+# resolver igual el mismo conflicto.
+MERGE_BLOQUES = {
+    "config": [["aperturaUsdt", "aperturaFecha", "aperturaSaldos",
+                "aperturaTs", "aperturaBase"]],
+}
 
 RENUMERAR = ("brl", "vzla", "eeuu")
 DIAS_MARCA_MS = 2592000000   # 30 dias, igual que _marcarBorradoMerge
@@ -560,26 +579,113 @@ def _asignar_js(v):
     return {}
 
 
-def merge_config_safe(remota, local):
+def _gana_remoto(k, tr, tl, rv, lv):
+    """Quien gana una clave de config. En este orden:
+
+    1. Los dos dicen cuando la tocaron -> la marca mas nueva.
+    2. Solo uno lo dice -> ese. Quien afirma "yo cambie esto" gana sobre quien
+       no afirma nada.
+    3. Ninguno lo dice -> se queda lo guardado, salvo que lo guardado este
+       vacio. Es la regla vieja, que se mantiene para todo lo que el navegador
+       nunca marco: asi este arreglo no cambia de golpe el comportamiento de
+       claves que llevan anios quietas.
+    """
+    if _es_numero(tr) and _es_numero(tl):
+        return tr > tl
+    if _es_numero(tr):
+        return True
+    if _es_numero(tl):
+        return False
+    # Sin marcas: la regla de siempre. undefined/null/"" y 0 se dejan rellenar;
+    # un false puesto a proposito (una comision exonerada, un modulo apagado)
+    # NO se deja pisar.
+    return lv is None or (isinstance(lv, str) and lv == "") or (_es_numero(lv) and lv == 0)
+
+
+def _marca_mas_nueva(marcas, claves):
+    t = None
+    for k in claves:
+        v = (marcas or {}).get(k)
+        if _es_numero(v) and (t is None or v > t):
+            t = v
+    return t
+
+
+def merge_config_safe(remota, local, marcas_rem=None, marcas_loc=None):
+    """Fusiona config. `remota` es lo que manda el aparato y `local` lo
+    guardado; el servidor es el arbitro.
+
+    ARREGLO 61: antes esta funcion solo copiaba lo remoto cuando lo guardado
+    estaba vacio, asi que un valor de config que YA existia no se podia
+    cambiar desde ningun aparato. La app lo cambiaba en su memoria, lo
+    enseñaba, y en el guardado siguiente el servidor le devolvia el viejo.
+    Desde el 14/09 esta medido: el telefono y la PC daban dos aperturas
+    distintas y ninguna se imponia.
+    """
     if _falsy_js(remota):
         return local
     if _falsy_js(local):
         return remota
+    marcas_rem = marcas_rem if isinstance(marcas_rem, dict) else {}
+    marcas_loc = marcas_loc if isinstance(marcas_loc, dict) else {}
     salida = _asignar_js(local)
+
+    # Los bloques primero: sus claves quedan decididas y no se vuelven a mirar.
+    ya = set()
+    for bloque in MERGE_BLOQUES.get("config", []):
+        hay_rem = any(k in remota for k in bloque)
+        if not hay_rem:
+            continue
+        ya.update(bloque)
+        hay_loc = any(k in salida for k in bloque)
+        tr = _marca_mas_nueva(marcas_rem, bloque)
+        tl = _marca_mas_nueva(marcas_loc, bloque)
+        entra = (not hay_loc) or (tr is not None and (tl is None or tr > tl))
+        if not entra:
+            continue
+        # Entra el bloque ENTERO: las claves que el aparato no trae se borran,
+        # porque son de la apertura vieja y mezclarlas seria volver al mismo
+        # problema.
+        for k in bloque:
+            if k in remota:
+                salida[k] = _leer_js(remota, k)
+            elif k in salida:
+                del salida[k]
+
     for k in _claves_js(remota):
+        if k in ya:
+            continue
         rv = _leer_js(remota, k)
         lv = _leer_js(local, k)
-        if isinstance(rv, dict):
-            # typeof lv === "object" en JS es cierto tambien para arreglos y
-            # para null; null ya cae en el `else` por ser falsy en la rama de
-            # arriba de la recursion.
+        tr, tl = marcas_rem.get(k), marcas_loc.get(k)
+        if isinstance(rv, dict) and not _es_numero(tr) and not _es_numero(tl):
+            # Sin marcas de ningun lado se sigue entrando al objeto, como
+            # siempre: dentro puede haber claves que el servidor no tiene.
             salida[k] = merge_config_safe(rv, lv if isinstance(lv, (dict, list)) else {})
-        elif lv is None or (isinstance(lv, str) and lv == "") or (_es_numero(lv) and lv == 0):
-            # El JS pregunta con === por undefined, null, "" y 0, y por nada
-            # mas. Un local en false NO entra aca: false es un valor puesto a
-            # proposito (una comision exonerada, un modulo apagado) y no debe
-            # dejarse pisar por lo remoto.
+        elif _gana_remoto(k, tr, tl, rv, lv):
             salida[k] = rv
+    return salida
+
+
+def unir_marcas_campos(a, b):
+    """Une dos _modCampos quedandose con la marca MAS NUEVA de cada clave.
+
+    ARREGLO 61: reemplazarlas perderia el rastro de lo que toco el otro
+    aparato, y con el rastro perdido la fusion vuelve a no poder decidir.
+    """
+    salida = {}
+    for origen in (a, b):
+        if not isinstance(origen, dict):
+            continue
+        for campo, claves in origen.items():
+            if not isinstance(claves, dict):
+                continue
+            destino = salida.setdefault(campo, {})
+            for k, t in claves.items():
+                if not _es_numero(t):
+                    continue
+                if not _es_numero(destino.get(k)) or t > destino[k]:
+                    destino[k] = t
     return salida
 
 
@@ -733,14 +839,22 @@ def fusionar_estado(entrante, guardado, ts_entrante, ts_guardado):
 
     marcas = unir_marcas(guardado.get("_deletedMerge") if guardado else None,
                          entrante.get("_deletedMerge"))
+    # ARREGLO 61: las marcas de config se unen ANTES de fusionar config, y con
+    # las de cada lado tal como llegaron —no con las ya unidas—, que es lo que
+    # permite comparar "cuando lo tocaste tu" contra "cuando lo toque yo".
+    marcas_campos = unir_marcas_campos(guardado.get("_modCampos") if guardado else None,
+                                       entrante.get("_modCampos"))
+    _mc_ent = (entrante.get("_modCampos") or {}).get("config") if isinstance(entrante.get("_modCampos"), dict) else {}
+    _mc_gua = ((guardado or {}).get("_modCampos") or {}).get("config") if isinstance((guardado or {}).get("_modCampos"), dict) else {}
 
     for k in DATA_KEYS:
-        if k == "_deletedMerge":
+        if k in ("_deletedMerge", "_modCampos"):
             continue
         if k not in entrante:
             continue
         if k == "config":
-            salida["config"] = merge_config_safe(entrante.get("config"), salida.get("config") or {})
+            salida["config"] = merge_config_safe(entrante.get("config"), salida.get("config") or {},
+                                                 _mc_ent, _mc_gua)
             continue
         if k in MERGE_FIELDS:
             campo_id = MERGE_ID_FIELD.get(k, "id")
@@ -757,6 +871,7 @@ def fusionar_estado(entrante, guardado, ts_entrante, ts_guardado):
             salida[k] = entrante[k]
 
     salida["_deletedMerge"] = marcas
+    salida["_modCampos"] = marcas_campos
     limpiar_config_de_estado(salida)
     podar_borrados(salida, marcas)
     for k in RENUMERAR:

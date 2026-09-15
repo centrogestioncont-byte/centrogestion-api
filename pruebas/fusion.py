@@ -138,5 +138,17 @@ ok(len(r.get("clientes") or []) == 1, "lo que el aparato no manda se queda como 
 r = main.fusionar_estado({"config": {"usuarios": [{"pin": "1234"}], "a": 1}}, {"config": {}}, T2, T1)
 ok("usuarios" not in r["config"], "los perfiles con PIN se siguen borrando de config")
 
+# FASE B: los permisos por ROL ya no deciden nada. Se borran aunque esten
+# guardados desde antes: merge_config_safe arranca de lo GUARDADO, asi que una
+# clave que el servidor todavia tenga vuelve sola en el guardado siguiente.
+r = main.fusionar_estado({"config": {"a": 1}},
+                         {"config": {"modulos": {"brl_nueva": False}}}, T2, T1)
+ok("modulos" not in r["config"],
+   "los permisos por rol se borran de config aunque ya estuvieran guardados")
+# Y si un aparato viejo los vuelve a mandar, tampoco entran.
+r = main.fusionar_estado({"config": {"modulos": {"brl_nueva": False}}},
+                         {"config": {}}, T2, T1)
+ok("modulos" not in r["config"], "ni aunque los mande un aparato viejo")
+
 print("\n" + ("FALLARON %d prueba(s)" % len(fallos) if fallos else "Todo en orden."))
 sys.exit(1 if fallos else 0)

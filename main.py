@@ -699,7 +699,12 @@ def unir_marcas_campos(a, b):
 # guardado y le AGREGA las claves que el dispositivo no trae: una clave que
 # el servidor todavia tenga vuelve sola en el guardado siguiente. Este es el
 # unico lugar donde el borrado es definitivo.
-CONFIG_PROHIBIDO = ["usuarios", "pins"]
+#
+# "modulos" se suma con la FASE B. Eran los permisos por ROL, y ya no deciden
+# nada: ahora los permisos son de cada persona y viven en la coleccion de
+# usuarios. Si se quedaran aqui, el bloque de estado cargaria para siempre con
+# un permiso muerto que cualquier aparato viejo podria seguir mandando.
+CONFIG_PROHIBIDO = ["usuarios", "pins", "modulos"]
 
 
 def limpiar_config(cfg):

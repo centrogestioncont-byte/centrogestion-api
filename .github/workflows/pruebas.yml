@@ -1,0 +1,30 @@
+# Revision automatica en cada Pull Request, igual que en el repositorio de la
+# app. Este repositorio no tenia ninguna: las pruebas de la fusion existian
+# pero no las corria nadie salvo a mano, y la fusion es justo lo que ya se
+# rompio cuatro veces.
+#
+# real.py no entra aqui a proposito: necesita un export de la dueña, que no
+# puede vivir en el repositorio.
+name: Pruebas
+
+on:
+  pull_request:
+    branches: [test, main]
+  push:
+    branches: [test, main]
+
+jobs:
+  fusion:
+    name: Probar la fusion del estado
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # Sin dependencias: pruebas/fusion.py sustituye pymongo por un doble,
+      # porque instalarlo arrastra extensiones que aqui no hacen falta.
+      - name: Fusion del estado
+        run: python3 pruebas/fusion.py

@@ -28,3 +28,10 @@ jobs:
       # porque instalarlo arrastra extensiones que aqui no hacen falta.
       - name: Fusion del estado
         run: python3 pruebas/fusion.py
+
+      # El lector del mercado: se le pone un tablon de mentira delante, asi que
+      # no necesita internet. La llamada real a Binance no se puede probar aqui
+      # -el CI no sale a la red- y por eso /mercado dice de cuantos anuncios
+      # salio cada numero: si algo no cuadra al desplegar, se ve al momento.
+      - name: Lector del mercado P2P
+        run: python3 pruebas/mercado.py

@@ -11,6 +11,7 @@
 #   GET/PUT /estado                     TODO el resto del negocio
 #   POST /estado/importar               la carga inicial desde Firebase
 #   GET/POST /auditoria                 quien hizo que y cuando
+#   GET  /mercado                       el P2P de Binance, a su volumen
 #
 # /estado es el reemplazo de Firebase. El navegador manda su bloque, el
 # SERVIDOR fusiona y devuelve el resultado. Antes cada dispositivo fusionaba
@@ -28,6 +29,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
+from urllib.request import Request, urlopen
 
 from bson import ObjectId
 from bson.errors import InvalidId
@@ -1109,6 +1111,158 @@ def restaurar_respaldo(archivo):
 
 
 # ── Servidor ─────────────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════
+# EL MERCADO P2P — a como esta comprando y vendiendo USDT la gente, AHORA
+# ══════════════════════════════════════════════════════════════════════════
+# Sus palabras: "no puedo estar todo el tiempo dependiendo de mi competencia
+# para saber si bajo o subo la tasa".
+#
+# Esto vive AQUI y no en la app por una razon que no tiene vuelta: la app
+# corre en una pagina, y Binance no autoriza que otro dominio le pregunte —el
+# navegador bloquea la respuesta antes de que llegue—. El servidor no tiene esa
+# limitacion. No hace falta volver a intentarlo del otro lado.
+#
+# Lo que se lee es el tablon P2P, el mismo que carga su pagina. No es un
+# contrato: puede cambiar sin avisar. Por eso TODO lo de aqui falla suave —si
+# algo no viene como se espera, se contesta "sin lectura" y la app sigue
+# entera—. La misma regla que la huella: una pieza que no responde no puede
+# costarle el dia.
+#
+# Para VENEZUELA no hay alternativa: Binance no tiene par al contado USDT/VES.
+# El unico sitio donde existe ese precio es este tablon.
+BINANCE_P2P = "https://p2p.binance.com/bapi/c2c/v2/friendly/c2c/adv/search"
+MERCADO_ESPERA = 6          # segundos; si tarda mas, se responde sin lectura
+MERCADO_CACHE_SEG = 300     # 5 min: ella abre la pantalla muchas veces al dia
+MERCADO_MAX_ANUNCIOS = 10   # de los que pasan el filtro, los 10 mejores
+
+# Su volumen tipico, medido en sus propios lotes (70 compras y 131 ventas):
+# compra USDT con reales por una mediana de 196 USDT (~R$ 1.000) y vende por
+# bolivares por 118 USDT (~112.000 Bs). Importa: en el tablon los buenos
+# precios estan en los anuncios GRANDES, asi que leer "el mejor precio" le
+# daria uno que no puede tomar, y publicaria una tasa que no puede sostener.
+MERCADO_MONTO_POR_DEFECTO = {"BRL": 1000.0, "VES": 112000.0}
+
+_mercado_cache = {}
+_mercado_candado = threading.Lock()
+
+
+def _num_o_none(v):
+    """Un numero de verdad, o nada. El tablon devuelve los precios como texto."""
+    try:
+        n = float(v)
+    except (TypeError, ValueError):
+        return None
+    if n != n or n in (float("inf"), float("-inf")) or n <= 0:
+        return None
+    return n
+
+
+def _mediana(valores):
+    if not valores:
+        return None
+    v = sorted(valores)
+    m = len(v) // 2
+    return v[m] if len(v) % 2 else (v[m - 1] + v[m]) / 2.0
+
+
+def _pedir_tablon(fiat, tipo, filas=20):
+    """Una pagina del tablon. Devuelve la lista cruda, o None si algo falla.
+
+    tipo es desde el punto de vista de quien pregunta: "BUY" = quiero comprar
+    USDT, y contesta con los anuncios de quien vende.
+    """
+    cuerpo = json.dumps({
+        "fiat": fiat, "asset": "USDT", "tradeType": tipo,
+        "page": 1, "rows": filas, "payTypes": [], "publisherType": None,
+    }).encode("utf-8")
+    pedido = Request(BINANCE_P2P, data=cuerpo, method="POST", headers={
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "User-Agent": "centrogestion-api",
+    })
+    try:
+        with urlopen(pedido, timeout=MERCADO_ESPERA) as r:
+            datos = json.loads(r.read().decode("utf-8"))
+    except Exception:
+        return None
+    if not isinstance(datos, dict):
+        return None
+    lista = datos.get("data")
+    return lista if isinstance(lista, list) else None
+
+
+def _leer_mercado(fiat, tipo, monto):
+    """El precio alcanzable A SU VOLUMEN, no el mejor del tablon.
+
+    Devuelve {tasa, anuncios, monto} o None. Se queda con los anuncios cuyo
+    rango acepte su monto, y de esos toma la MEDIANA: el primero de la lista
+    suele ser diminuto o con condiciones, y publicar contra ese numero es
+    publicar contra un precio que no existe para ella.
+    """
+    crudo = _pedir_tablon(fiat, tipo)
+    if crudo is None:
+        return None
+    precios = []
+    for fila in crudo:
+        if not isinstance(fila, dict):
+            continue
+        adv = fila.get("adv")
+        if not isinstance(adv, dict):
+            continue
+        precio = _num_o_none(adv.get("price"))
+        minimo = _num_o_none(adv.get("minSingleTransAmount"))
+        maximo = _num_o_none(adv.get("maxSingleTransAmount"))
+        if precio is None:
+            continue
+        # Sin limites declarados no se puede saber si lo acepta: se descarta
+        # en vez de suponer que si.
+        if minimo is None or maximo is None:
+            continue
+        if monto < minimo or monto > maximo:
+            continue
+        precios.append(precio)
+        if len(precios) >= MERCADO_MAX_ANUNCIOS:
+            break
+    if not precios:
+        return None
+    return {"tasa": round(_mediana(precios), 4),
+            "anuncios": len(precios), "monto": monto}
+
+
+def mercado_p2p(montos=None):
+    """Las dos lecturas que necesita, con cache.
+
+    NUNCA levanta: si Binance no contesta, o contesta algo raro, devuelve
+    disponible=False y la app dibuja "sin lectura". Que se caiga el tablon no
+    puede dejarla sin poder trabajar.
+    """
+    montos = montos or {}
+    brl = _num_o_none(montos.get("BRL")) or MERCADO_MONTO_POR_DEFECTO["BRL"]
+    ves = _num_o_none(montos.get("VES")) or MERCADO_MONTO_POR_DEFECTO["VES"]
+    clave = (brl, ves)
+    ahora_seg = time.time()
+    with _mercado_candado:
+        guardado = _mercado_cache.get(clave)
+        if guardado and (ahora_seg - guardado[0]) < MERCADO_CACHE_SEG:
+            return guardado[1]
+    # Ella COMPRA USDT con reales -> mira a quien los vende (BUY).
+    # Ella VENDE USDT por bolivares -> mira a quien los compra (SELL).
+    compra = _leer_mercado("BRL", "BUY", brl)
+    venta = _leer_mercado("VES", "SELL", ves)
+    fuera = {
+        "ok": True,
+        "leido": ahora().isoformat(),
+        "compraBRL": compra,
+        "ventaVES": venta,
+        "disponible": bool(compra or venta),
+    }
+    if not fuera["disponible"]:
+        fuera["motivo"] = "Binance no contesto o no hay anuncios para ese monto"
+    with _mercado_candado:
+        _mercado_cache[clave] = (ahora_seg, fuera)
+    return fuera
+
+
 class Manejador(BaseHTTPRequestHandler):
     server_version = "centrogestion-api"
 
@@ -1166,6 +1320,20 @@ class Manejador(BaseHTTPRequestHandler):
             return None, (403, {"ok": False, "error": "tu usuario no puede modificar datos"})
         return usuario, None
 
+    def _sesion_sin_base(self):
+        """Como _sesion, pero si Mongo esta caido lo dice en vez de reventar.
+
+        El mercado no guarda nada ni lee del negocio: no tiene por que caerse
+        con la base. Se separa para no meter un try dentro de cada ruta.
+        """
+        try:
+            usuario = usuario_de_sesion(self._testigo())
+        except PyMongoError:
+            return None, (503, {"ok": False, "error": "base no disponible"})
+        if not usuario:
+            return None, (401, {"ok": False, "error": "sesion vencida"})
+        return usuario, None
+
     def _sesion(self):
         """Solo pide sesion valida: alcanza para leer."""
         usuario = usuario_de_sesion(self._testigo())
@@ -1221,6 +1389,19 @@ class Manejador(BaseHTTPRequestHandler):
                 return self._responder(200, {"ok": True, "clientes": listar_clientes()})
             except PyMongoError:
                 return self._responder(503, {"ok": False, "error": "base no disponible"})
+
+        if ruta == "/mercado":
+            # Pide sesion como todo lo demas, pero NO toca Mongo: si la base
+            # esta caida esto sigue contestando, y al reves tambien.
+            usuario, error = self._sesion_sin_base()
+            if error:
+                return self._responder(*error)
+            pedido = parse_qs(urlparse(self.path).query)
+            montos = {
+                "BRL": (pedido.get("brl") or [None])[0],
+                "VES": (pedido.get("ves") or [None])[0],
+            }
+            return self._responder(200, mercado_p2p(montos))
 
         if ruta == "/estado":
             # Cualquier sesion valida puede leer: el Supervisor tambien tiene

@@ -1240,7 +1240,7 @@ def _porque_vacio(datos, fiat):
     return base + (" (" + " · ".join(trozos) + ")" if trozos else "")
 
 
-def _pedir_tablon(fiat, tipo, filas=20):
+def _pedir_tablon(fiat, tipo, filas=20, sencillo=False):
     """Una pagina del tablon. Devuelve (lista, motivo del fallo).
 
     tipo es desde el punto de vista de quien pregunta: "BUY" = quiero comprar
@@ -1252,13 +1252,17 @@ def _pedir_tablon(fiat, tipo, filas=20):
     Son problemas distintos y se arreglan en sitios distintos -uno aqui, el
     otro bajando el monto en Configuracion-, asi que hay que poder decir cual.
     """
-    cuerpo = json.dumps({
-        "fiat": fiat, "asset": "USDT", "tradeType": tipo,
-        "page": 1, "rows": filas, "payTypes": [], "publisherType": None,
+    pregunta = {"fiat": fiat, "asset": "USDT", "tradeType": tipo,
+                "page": 1, "rows": filas}
+    if not sencillo:
         # Lo que manda su propia pagina. Cuesta nada y es una cosa menos por la
         # que el filtro pueda decir que esto no es un navegador.
-        "clientType": "web",
-    }).encode("utf-8")
+        #
+        # Con "sencillo" se quitan los tres: es la pregunta minima que el tablon
+        # entiende. Sirve para saber si lo que vacia una moneda es alguno de
+        # estos campos y no que de verdad no haya anuncios.
+        pregunta.update({"payTypes": [], "publisherType": None, "clientType": "web"})
+    cuerpo = json.dumps(pregunta).encode("utf-8")
     pedido = Request(BINANCE_P2P, data=cuerpo, method="POST",
                      headers=dict(MERCADO_CABECERAS))
     try:
@@ -1306,6 +1310,25 @@ def _leer_mercado(fiat, tipo, monto):
     crudo, fallo = _pedir_tablon(fiat, tipo)
     if crudo is None:
         return None, fallo
+    # Un tablon vacio en un mercado grande no es creible, asi que se pregunta
+    # UNA vez mas con el cuerpo mas simple posible. Separa "Binance no tiene
+    # anuncios" de "no le gusta como se lo pedimos" —y si era lo segundo, lo
+    # arregla en el acto, sin esperar a otro despliegue—.
+    #
+    # Solo cuando ya vino vacio: una lectura buena no cuesta ni una llamada mas
+    # de las que costaba. Y solo una vez: dos no aportan nada y Binance corta
+    # a quien pregunta mucho.
+    if not crudo:
+        crudo_otra, fallo_otra = _pedir_tablon(fiat, tipo, sencillo=True)
+        if crudo_otra:
+            crudo, fallo = crudo_otra, ""
+        else:
+            # El motivo se construye entero aqui, no pegando un sufijo a lo que
+            # hubiera: si el primero venia vacio quedaba una frase empezada por
+            # " · con la pregunta simple tampoco", que no dice ni de que moneda.
+            base = (fallo_otra or fallo or
+                    ("Binance no tiene anuncios de %s ahora mismo" % fiat))
+            fallo = base + " · con la pregunta simple tampoco"
     precios = []
     for fila in crudo:
         if not isinstance(fila, dict):

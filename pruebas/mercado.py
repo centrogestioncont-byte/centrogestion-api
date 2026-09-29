@@ -134,6 +134,8 @@ con_tablon([])
 m = porque("BRL", "BUY", 1000)
 ok("BRL" in m and "1.000" not in m,
    "un tablon vacio no se disfraza de problema de monto", m)
+ok(not m.startswith(" ") and not m.startswith("·"),
+   "y el motivo nunca empieza a media frase, aunque el primer intento no traiga texto", m)
 con_tablon([anuncio(5.12, 1, 999999)])
 ok(porque("BRL", "BUY", 1000) == "",
    "y cuando sale bien no hay motivo que contar")
@@ -276,6 +278,63 @@ main._pedir_tablon = lambda fiat, tipo, *a, **k: (
 ok("000002" in main._leer_mercado("BRL", "BUY", 1000)[1],
    "y el motivo del tablon vacio llega hasta la tarjeta", main._leer_mercado("BRL", "BUY", 1000)[1])
 
+print("\n== Un lado vacio se vuelve a pedir UNA vez, con la pregunta simple ==")
+vistas = []
+
+
+def sencillo_funciona(fiat, tipo, filas_n=20, sencillo=False):
+    vistas.append(sencillo)
+    return ([anuncio(5.12, 1, 999999)], "") if sencillo else ([], "vacio")
+
+
+main._pedir_tablon = sencillo_funciona
+r, motivo = main._leer_mercado("BRL", "BUY", 1000)
+ok(vistas == [False, True], "primero como siempre, y si viene vacio, simple", vistas)
+ok(r and r["tasa"] == 5.12, "si con la simple si hay anuncios, se usan", r)
+ok(motivo == "", "y no queda motivo que contar: salio bien", motivo)
+
+# Si tampoco, se dice que se intento: si no, parece que no se probo.
+vistas2 = []
+
+
+def vacio_siempre(fiat, tipo, filas_n=20, sencillo=False):
+    vistas2.append(sencillo)
+    return [], "Binance devolvio 0 anuncios de BRL"
+
+
+main._pedir_tablon = vacio_siempre
+r, motivo = main._leer_mercado("BRL", "BUY", 1000)
+ok(vistas2 == [False, True], "se intenta una vez, no dos ni diez", vistas2)
+ok("con la pregunta simple tampoco" in motivo,
+   "y se dice que la simple tampoco: si no, parece que no se probo", motivo)
+
+# Lo que NO puede pasar: gastar una llamada de mas cuando ya habia anuncios,
+# ni cuando Binance no contesto (ahi el problema no es el cuerpo).
+vistas3 = []
+
+
+def con_anuncios(fiat, tipo, filas_n=20, sencillo=False):
+    vistas3.append(sencillo)
+    return [anuncio(5.12, 1, 999999)], ""
+
+
+main._pedir_tablon = con_anuncios
+main._leer_mercado("BRL", "BUY", 1000)
+ok(vistas3 == [False], "una lectura buena no cuesta ni una llamada mas", vistas3)
+
+vistas4 = []
+
+
+def no_contesta(fiat, tipo, filas_n=20, sencillo=False):
+    vistas4.append(sencillo)
+    return None, "Binance respondio 403"
+
+
+main._pedir_tablon = no_contesta
+main._leer_mercado("BRL", "BUY", 1000)
+ok(vistas4 == [False],
+   "y si Binance no contesta no se reintenta: ahi el problema no es el cuerpo", vistas4)
+
 print("\n== El servidor no se presenta ante Binance como un robot ==")
 # Aqui no hay internet, asi que se mira lo que SE IBA A MANDAR. Basta: lo que
 # el filtro de Binance corta es esto, no lo que conteste despues.
@@ -320,6 +379,21 @@ ok(capturado.get("cuerpo", {}).get("clientType") == "web",
    "y el cuerpo dice que viene de la web", capturado.get("cuerpo"))
 ok(capturado.get("url") == main.BINANCE_P2P,
    "sin cambiar la direccion del tablon", capturado.get("url"))
+
+# La pregunta simple quita los tres campos, pero NO las cabeceras: lo que se
+# esta probando con ella es el cuerpo, y cambiar dos cosas a la vez no diria
+# cual fue.
+main.urlopen = _urlopen_falso
+_TABLON_REAL("BRL", "BUY", sencillo=True)
+main.urlopen = _urlopen_real
+c2 = capturado.get("cuerpo", {})
+ok("clientType" not in c2 and "payTypes" not in c2 and "publisherType" not in c2,
+   "la pregunta simple va sin los tres campos de adorno", c2)
+ok(c2.get("fiat") == "BRL" and c2.get("tradeType") == "BUY" and c2.get("asset") == "USDT",
+   "pero sigue preguntando lo mismo", c2)
+cab2 = {k.lower(): v for k, v in capturado.get("cabeceras", {}).items()}
+ok("Mozilla" in cab2.get("user-agent", ""),
+   "y con las mismas cabeceras: se prueba el cuerpo, no las dos cosas a la vez", cab2.get("user-agent"))
 
 print("\n" + ("FALLARON %d prueba(s)" % len(fallos) if fallos else "Todo en orden."))
 sys.exit(1 if fallos else 0)

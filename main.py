@@ -28,6 +28,7 @@ import threading
 import time
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, urlparse
 from urllib.request import Request, urlopen
 
@@ -1133,6 +1134,12 @@ def restaurar_respaldo(archivo):
 BINANCE_P2P = "https://p2p.binance.com/bapi/c2c/v2/friendly/c2c/adv/search"
 MERCADO_ESPERA = 6          # segundos; si tarda mas, se responde sin lectura
 MERCADO_CACHE_SEG = 300     # 5 min: ella abre la pantalla muchas veces al dia
+# Un FALLO no se guarda cinco minutos. El boton de la tarjeta dice "reintentar"
+# y con el cache largo no reintentaba nada: devolvia el mismo fallo guardado
+# durante cinco minutos, asi que pulsarlo parecia no hacer nada. Veinte
+# segundos es bastante para que cien repintados no se conviertan en cien
+# preguntas a Binance, y poco para que pulsar el boton signifique algo.
+MERCADO_CACHE_FALLO_SEG = 20
 MERCADO_MAX_ANUNCIOS = 10   # de los que pasan el filtro, los 10 mejores
 
 # Su volumen tipico, medido en sus propios lotes (70 compras y 131 ventas):
@@ -1141,6 +1148,29 @@ MERCADO_MAX_ANUNCIOS = 10   # de los que pasan el filtro, los 10 mejores
 # precios estan en los anuncios GRANDES, asi que leer "el mejor precio" le
 # daria uno que no puede tomar, y publicaria una tasa que no puede sostener.
 MERCADO_MONTO_POR_DEFECTO = {"BRL": 1000.0, "VES": 112000.0}
+
+# Como se presenta ante Binance. Esto NO es cosmetico: el tablon es la misma
+# direccion que carga su pagina y delante tiene un filtro que corta a lo que no
+# parece un navegador. El servidor se presentaba como "centrogestion-api" -que
+# es justo lo que ese filtro busca- y desde el navegador la tarjeta solo decia
+# "sin lectura", sin numero ni nada.
+#
+# No hay forma de probar esto sin salir a internet, ni aqui ni en el CI: la
+# unica prueba de verdad es su servidor desplegado. Por eso el commit anterior
+# va primero: si esto no era, la tarjeta ahora dice que fue.
+#
+# Origin y Referer van porque un navegador de verdad los manda al llamar a esta
+# direccion, y un filtro que mira el User-Agent suele mirarlos tambien.
+MERCADO_CABECERAS = {
+    "Content-Type": "application/json",
+    "Accept": "application/json",
+    "Accept-Language": "es,en;q=0.9",
+    "Origin": "https://p2p.binance.com",
+    "Referer": "https://p2p.binance.com/es/trade/all-payments/USDT",
+    "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                   "AppleWebKit/537.36 (KHTML, like Gecko) "
+                   "Chrome/126.0.0.0 Safari/537.36"),
+}
 
 _mercado_cache = {}
 _mercado_candado = threading.Lock()
@@ -1165,43 +1195,87 @@ def _mediana(valores):
     return v[m] if len(v) % 2 else (v[m - 1] + v[m]) / 2.0
 
 
+def _motivo_corto(v, tope=70):
+    """Lo que venga, en una linea corta.
+
+    Esto acaba en una tarjeta de SU pantalla, no en un log: un volcado de tres
+    parrafos ahi no se lee y encima puede traer cosas de Binance que no
+    controlamos. Se aplasta a una linea y se corta.
+    """
+    t = " ".join(str(v if v is not None else "").split())
+    return t[:tope] if t else "sin detalle"
+
+
+def _monto_legible(monto):
+    """1000 -> "1.000". Va dentro de una frase que ella lee."""
+    try:
+        return "{:,.0f}".format(float(monto)).replace(",", ".")
+    except (TypeError, ValueError):
+        return str(monto)
+
+
 def _pedir_tablon(fiat, tipo, filas=20):
-    """Una pagina del tablon. Devuelve la lista cruda, o None si algo falla.
+    """Una pagina del tablon. Devuelve (lista, motivo del fallo).
 
     tipo es desde el punto de vista de quien pregunta: "BUY" = quiero comprar
     USDT, y contesta con los anuncios de quien vende.
+
+    Devuelve DOS cosas a proposito. Antes devolvia la lista o None a secas, y
+    ese None se confundia mas abajo con "el tablon contesto pero ningun anuncio
+    acepta su monto": la pantalla acababa diciendo "sin lectura" para las dos.
+    Son problemas distintos y se arreglan en sitios distintos -uno aqui, el
+    otro bajando el monto en Configuracion-, asi que hay que poder decir cual.
     """
     cuerpo = json.dumps({
         "fiat": fiat, "asset": "USDT", "tradeType": tipo,
         "page": 1, "rows": filas, "payTypes": [], "publisherType": None,
+        # Lo que manda su propia pagina. Cuesta nada y es una cosa menos por la
+        # que el filtro pueda decir que esto no es un navegador.
+        "clientType": "web",
     }).encode("utf-8")
-    pedido = Request(BINANCE_P2P, data=cuerpo, method="POST", headers={
-        "Content-Type": "application/json",
-        "Accept": "application/json",
-        "User-Agent": "centrogestion-api",
-    })
+    pedido = Request(BINANCE_P2P, data=cuerpo, method="POST",
+                     headers=dict(MERCADO_CABECERAS))
     try:
         with urlopen(pedido, timeout=MERCADO_ESPERA) as r:
             datos = json.loads(r.read().decode("utf-8"))
+    except HTTPError as err:
+        # El caso mas esperable: Binance corta a quien no le gusta. El numero
+        # importa -403 es "no me fio de ti" y 429 es "vas muy rapido"- y se
+        # arreglan distinto, asi que se dice cual fue.
+        return None, "Binance respondio %s" % err.code
+    except TimeoutError:
+        return None, "Binance tardo mas de %ss en contestar" % MERCADO_ESPERA
+    except URLError as err:
+        # HTTPError hereda de URLError, por eso va despues. Aqui caen las que
+        # no llegaron a tener respuesta: DNS, conexion rechazada, salida
+        # bloqueada.
+        return None, "no se llego a Binance (%s)" % _motivo_corto(err.reason)
     except Exception:
-        return None
+        return None, "Binance contesto algo que no se entiende"
     if not isinstance(datos, dict):
-        return None
+        return None, "Binance contesto algo que no se entiende"
     lista = datos.get("data")
-    return lista if isinstance(lista, list) else None
+    if not isinstance(lista, list):
+        # Cuando corta por filtro suele contestar 200 con su propio mensaje
+        # dentro en vez de un error HTTP. Decirlo vale mas que "no se entiende".
+        suyo = datos.get("message") or datos.get("code")
+        if suyo:
+            return None, "Binance dijo: %s" % _motivo_corto(suyo)
+        return None, "Binance contesto sin lista de anuncios"
+    return lista, ""
 
 
 def _leer_mercado(fiat, tipo, monto):
     """El precio alcanzable A SU VOLUMEN, no el mejor del tablon.
 
-    Devuelve {tasa, anuncios, monto} o None. Se queda con los anuncios cuyo
-    rango acepte su monto, y de esos toma la MEDIANA: el primero de la lista
-    suele ser diminuto o con condiciones, y publicar contra ese numero es
-    publicar contra un precio que no existe para ella.
+    Devuelve ({tasa, anuncios, monto}, "") o (None, motivo). Se queda con los
+    anuncios cuyo rango acepte su monto, y de esos toma la MEDIANA: el primero
+    de la lista suele ser diminuto o con condiciones, y publicar contra ese
+    numero es publicar contra un precio que no existe para ella.
     """
-    crudo = _pedir_tablon(fiat, tipo)
+    crudo, fallo = _pedir_tablon(fiat, tipo)
     if crudo is None:
-        return None
+        return None, fallo
     precios = []
     for fila in crudo:
         if not isinstance(fila, dict):
@@ -1224,16 +1298,21 @@ def _leer_mercado(fiat, tipo, monto):
         if len(precios) >= MERCADO_MAX_ANUNCIOS:
             break
     if not precios:
-        return None
+        if not crudo:
+            return None, "Binance no tiene anuncios de %s ahora mismo" % fiat
+        # Este es el que ella puede arreglar sola, asi que se dice con sus
+        # numeros: cuantos habia y cuanto pidio.
+        return None, ("de los %d anuncios de %s, ninguno acepta %s"
+                      % (len(crudo), fiat, _monto_legible(monto)))
     return {"tasa": round(_mediana(precios), 4),
-            "anuncios": len(precios), "monto": monto}
+            "anuncios": len(precios), "monto": monto}, ""
 
 
 def mercado_p2p(montos=None):
     """Las dos lecturas que necesita, con cache.
 
     NUNCA levanta: si Binance no contesta, o contesta algo raro, devuelve
-    disponible=False y la app dibuja "sin lectura". Que se caiga el tablon no
+    disponible=False y la app dibuja lo que paso. Que se caiga el tablon no
     puede dejarla sin poder trabajar.
     """
     montos = montos or {}
@@ -1243,12 +1322,15 @@ def mercado_p2p(montos=None):
     ahora_seg = time.time()
     with _mercado_candado:
         guardado = _mercado_cache.get(clave)
-        if guardado and (ahora_seg - guardado[0]) < MERCADO_CACHE_SEG:
-            return guardado[1]
+        if guardado:
+            vida = (MERCADO_CACHE_SEG if guardado[1].get("disponible")
+                    else MERCADO_CACHE_FALLO_SEG)
+            if (ahora_seg - guardado[0]) < vida:
+                return guardado[1]
     # Ella COMPRA USDT con reales -> mira a quien los vende (BUY).
     # Ella VENDE USDT por bolivares -> mira a quien los compra (SELL).
-    compra = _leer_mercado("BRL", "BUY", brl)
-    venta = _leer_mercado("VES", "SELL", ves)
+    compra, fallo_brl = _leer_mercado("BRL", "BUY", brl)
+    venta, fallo_ves = _leer_mercado("VES", "SELL", ves)
     fuera = {
         "ok": True,
         "leido": ahora().isoformat(),
@@ -1256,8 +1338,18 @@ def mercado_p2p(montos=None):
         "ventaVES": venta,
         "disponible": bool(compra or venta),
     }
+    # El porque va SIEMPRE que falte un lado, aunque el otro si tenga lectura.
+    # Con una sola de las dos tasas no hay suelo, asi que media lectura es un
+    # fallo que ella tiene que poder perseguir igual.
+    if not compra:
+        fuera["motivoBRL"] = fallo_brl
+    if not venta:
+        fuera["motivoVES"] = fallo_ves
     if not fuera["disponible"]:
-        fuera["motivo"] = "Binance no contesto o no hay anuncios para ese monto"
+        # Un resumen para quien solo mire este campo. Cuando las dos fallan por
+        # lo mismo -lo normal si el que corta es Binance- no se dice dos veces.
+        fuera["motivo"] = (fallo_brl if fallo_brl == fallo_ves
+                           else "reales: %s · bolivares: %s" % (fallo_brl, fallo_ves))
     with _mercado_candado:
         _mercado_cache[clave] = (ahora_seg, fuera)
     return fuera

@@ -191,6 +191,45 @@ ok(llamadas["n"] == primero, "la segunda lectura sale del cache", llamadas["n"])
 main.mercado_p2p({"BRL": "9999"})
 ok(llamadas["n"] > primero, "pero otro monto es otra lectura", llamadas["n"])
 
+print("\n== Un fallo NO se guarda cinco minutos ==")
+# El boton de la tarjeta dice "reintentar": con el cache largo devolvia el
+# mismo fallo durante cinco minutos y pulsarlo parecia no hacer nada.
+main._mercado_cache.clear()
+fallos_n = {"n": 0}
+
+
+def fallar(fiat, tipo, filas_n=20):
+    fallos_n["n"] += 1
+    return None, "Binance respondio 403"
+
+
+main._pedir_tablon = fallar
+main.mercado_p2p()
+antes = fallos_n["n"]
+main.mercado_p2p()
+ok(fallos_n["n"] == antes, "seguidas sale del cache: no se machaca a Binance")
+# Se envejece el guardado justo por encima del cache corto y por debajo del largo.
+clave = list(main._mercado_cache.keys())[0]
+momento, resp = main._mercado_cache[clave]
+main._mercado_cache[clave] = (momento - (main.MERCADO_CACHE_FALLO_SEG + 1), resp)
+main.mercado_p2p()
+ok(fallos_n["n"] > antes,
+   "pero a los %ss se vuelve a preguntar, aunque el cache bueno sea de %ss"
+   % (main.MERCADO_CACHE_FALLO_SEG, main.MERCADO_CACHE_SEG), fallos_n["n"])
+
+# Y al reves: una lectura BUENA si aguanta los cinco minutos completos.
+main._mercado_cache.clear()
+main._pedir_tablon = contar
+main.mercado_p2p()
+buenas = llamadas["n"]
+clave = list(main._mercado_cache.keys())[0]
+momento, resp = main._mercado_cache[clave]
+main._mercado_cache[clave] = (momento - (main.MERCADO_CACHE_FALLO_SEG + 1), resp)
+main.mercado_p2p()
+ok(llamadas["n"] == buenas,
+   "una lectura buena no caduca a los %ss: esa si dura los %ss"
+   % (main.MERCADO_CACHE_FALLO_SEG, main.MERCADO_CACHE_SEG), llamadas["n"])
+
 print("\n== Las dos direcciones no se confunden ==")
 # Ella COMPRA USDT con reales -> mira a quien VENDE (BUY).
 # Ella VENDE USDT por bolivares -> mira a quien COMPRA (SELL).

@@ -1134,6 +1134,12 @@ def restaurar_respaldo(archivo):
 BINANCE_P2P = "https://p2p.binance.com/bapi/c2c/v2/friendly/c2c/adv/search"
 MERCADO_ESPERA = 6          # segundos; si tarda mas, se responde sin lectura
 MERCADO_CACHE_SEG = 300     # 5 min: ella abre la pantalla muchas veces al dia
+# Un FALLO no se guarda cinco minutos. El boton de la tarjeta dice "reintentar"
+# y con el cache largo no reintentaba nada: devolvia el mismo fallo guardado
+# durante cinco minutos, asi que pulsarlo parecia no hacer nada. Veinte
+# segundos es bastante para que cien repintados no se conviertan en cien
+# preguntas a Binance, y poco para que pulsar el boton signifique algo.
+MERCADO_CACHE_FALLO_SEG = 20
 MERCADO_MAX_ANUNCIOS = 10   # de los que pasan el filtro, los 10 mejores
 
 # Su volumen tipico, medido en sus propios lotes (70 compras y 131 ventas):
@@ -1293,8 +1299,11 @@ def mercado_p2p(montos=None):
     ahora_seg = time.time()
     with _mercado_candado:
         guardado = _mercado_cache.get(clave)
-        if guardado and (ahora_seg - guardado[0]) < MERCADO_CACHE_SEG:
-            return guardado[1]
+        if guardado:
+            vida = (MERCADO_CACHE_SEG if guardado[1].get("disponible")
+                    else MERCADO_CACHE_FALLO_SEG)
+            if (ahora_seg - guardado[0]) < vida:
+                return guardado[1]
     # Ella COMPRA USDT con reales -> mira a quien los vende (BUY).
     # Ella VENDE USDT por bolivares -> mira a quien los compra (SELL).
     compra, fallo_brl = _leer_mercado("BRL", "BUY", brl)

@@ -28,6 +28,7 @@ import threading
 import time
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, urlparse
 from urllib.request import Request, urlopen
 
@@ -1165,11 +1166,36 @@ def _mediana(valores):
     return v[m] if len(v) % 2 else (v[m - 1] + v[m]) / 2.0
 
 
+def _motivo_corto(v, tope=70):
+    """Lo que venga, en una linea corta.
+
+    Esto acaba en una tarjeta de SU pantalla, no en un log: un volcado de tres
+    parrafos ahi no se lee y encima puede traer cosas de Binance que no
+    controlamos. Se aplasta a una linea y se corta.
+    """
+    t = " ".join(str(v if v is not None else "").split())
+    return t[:tope] if t else "sin detalle"
+
+
+def _monto_legible(monto):
+    """1000 -> "1.000". Va dentro de una frase que ella lee."""
+    try:
+        return "{:,.0f}".format(float(monto)).replace(",", ".")
+    except (TypeError, ValueError):
+        return str(monto)
+
+
 def _pedir_tablon(fiat, tipo, filas=20):
-    """Una pagina del tablon. Devuelve la lista cruda, o None si algo falla.
+    """Una pagina del tablon. Devuelve (lista, motivo del fallo).
 
     tipo es desde el punto de vista de quien pregunta: "BUY" = quiero comprar
     USDT, y contesta con los anuncios de quien vende.
+
+    Devuelve DOS cosas a proposito. Antes devolvia la lista o None a secas, y
+    ese None se confundia mas abajo con "el tablon contesto pero ningun anuncio
+    acepta su monto": la pantalla acababa diciendo "sin lectura" para las dos.
+    Son problemas distintos y se arreglan en sitios distintos -uno aqui, el
+    otro bajando el monto en Configuracion-, asi que hay que poder decir cual.
     """
     cuerpo = json.dumps({
         "fiat": fiat, "asset": "USDT", "tradeType": tipo,
@@ -1183,25 +1209,44 @@ def _pedir_tablon(fiat, tipo, filas=20):
     try:
         with urlopen(pedido, timeout=MERCADO_ESPERA) as r:
             datos = json.loads(r.read().decode("utf-8"))
+    except HTTPError as err:
+        # El caso mas esperable: Binance corta a quien no le gusta. El numero
+        # importa -403 es "no me fio de ti" y 429 es "vas muy rapido"- y se
+        # arreglan distinto, asi que se dice cual fue.
+        return None, "Binance respondio %s" % err.code
+    except TimeoutError:
+        return None, "Binance tardo mas de %ss en contestar" % MERCADO_ESPERA
+    except URLError as err:
+        # HTTPError hereda de URLError, por eso va despues. Aqui caen las que
+        # no llegaron a tener respuesta: DNS, conexion rechazada, salida
+        # bloqueada.
+        return None, "no se llego a Binance (%s)" % _motivo_corto(err.reason)
     except Exception:
-        return None
+        return None, "Binance contesto algo que no se entiende"
     if not isinstance(datos, dict):
-        return None
+        return None, "Binance contesto algo que no se entiende"
     lista = datos.get("data")
-    return lista if isinstance(lista, list) else None
+    if not isinstance(lista, list):
+        # Cuando corta por filtro suele contestar 200 con su propio mensaje
+        # dentro en vez de un error HTTP. Decirlo vale mas que "no se entiende".
+        suyo = datos.get("message") or datos.get("code")
+        if suyo:
+            return None, "Binance dijo: %s" % _motivo_corto(suyo)
+        return None, "Binance contesto sin lista de anuncios"
+    return lista, ""
 
 
 def _leer_mercado(fiat, tipo, monto):
     """El precio alcanzable A SU VOLUMEN, no el mejor del tablon.
 
-    Devuelve {tasa, anuncios, monto} o None. Se queda con los anuncios cuyo
-    rango acepte su monto, y de esos toma la MEDIANA: el primero de la lista
-    suele ser diminuto o con condiciones, y publicar contra ese numero es
-    publicar contra un precio que no existe para ella.
+    Devuelve ({tasa, anuncios, monto}, "") o (None, motivo). Se queda con los
+    anuncios cuyo rango acepte su monto, y de esos toma la MEDIANA: el primero
+    de la lista suele ser diminuto o con condiciones, y publicar contra ese
+    numero es publicar contra un precio que no existe para ella.
     """
-    crudo = _pedir_tablon(fiat, tipo)
+    crudo, fallo = _pedir_tablon(fiat, tipo)
     if crudo is None:
-        return None
+        return None, fallo
     precios = []
     for fila in crudo:
         if not isinstance(fila, dict):
@@ -1224,16 +1269,21 @@ def _leer_mercado(fiat, tipo, monto):
         if len(precios) >= MERCADO_MAX_ANUNCIOS:
             break
     if not precios:
-        return None
+        if not crudo:
+            return None, "Binance no tiene anuncios de %s ahora mismo" % fiat
+        # Este es el que ella puede arreglar sola, asi que se dice con sus
+        # numeros: cuantos habia y cuanto pidio.
+        return None, ("de los %d anuncios de %s, ninguno acepta %s"
+                      % (len(crudo), fiat, _monto_legible(monto)))
     return {"tasa": round(_mediana(precios), 4),
-            "anuncios": len(precios), "monto": monto}
+            "anuncios": len(precios), "monto": monto}, ""
 
 
 def mercado_p2p(montos=None):
     """Las dos lecturas que necesita, con cache.
 
     NUNCA levanta: si Binance no contesta, o contesta algo raro, devuelve
-    disponible=False y la app dibuja "sin lectura". Que se caiga el tablon no
+    disponible=False y la app dibuja lo que paso. Que se caiga el tablon no
     puede dejarla sin poder trabajar.
     """
     montos = montos or {}
@@ -1247,8 +1297,8 @@ def mercado_p2p(montos=None):
             return guardado[1]
     # Ella COMPRA USDT con reales -> mira a quien los vende (BUY).
     # Ella VENDE USDT por bolivares -> mira a quien los compra (SELL).
-    compra = _leer_mercado("BRL", "BUY", brl)
-    venta = _leer_mercado("VES", "SELL", ves)
+    compra, fallo_brl = _leer_mercado("BRL", "BUY", brl)
+    venta, fallo_ves = _leer_mercado("VES", "SELL", ves)
     fuera = {
         "ok": True,
         "leido": ahora().isoformat(),
@@ -1256,8 +1306,18 @@ def mercado_p2p(montos=None):
         "ventaVES": venta,
         "disponible": bool(compra or venta),
     }
+    # El porque va SIEMPRE que falte un lado, aunque el otro si tenga lectura.
+    # Con una sola de las dos tasas no hay suelo, asi que media lectura es un
+    # fallo que ella tiene que poder perseguir igual.
+    if not compra:
+        fuera["motivoBRL"] = fallo_brl
+    if not venta:
+        fuera["motivoVES"] = fallo_ves
     if not fuera["disponible"]:
-        fuera["motivo"] = "Binance no contesto o no hay anuncios para ese monto"
+        # Un resumen para quien solo mire este campo. Cuando las dos fallan por
+        # lo mismo -lo normal si el que corta es Binance- no se dice dos veces.
+        fuera["motivo"] = (fallo_brl if fallo_brl == fallo_ves
+                           else "reales: %s · bolivares: %s" % (fallo_brl, fallo_ves))
     with _mercado_candado:
         _mercado_cache[clave] = (ahora_seg, fuera)
     return fuera

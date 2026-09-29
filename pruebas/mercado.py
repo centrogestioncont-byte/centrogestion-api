@@ -56,9 +56,23 @@ def anuncio(precio, minimo, maximo):
                     "maxSingleTransAmount": str(maximo)}}
 
 
-def con_tablon(filas):
-    """Sustituye la llamada a Binance por una respuesta fija."""
-    main._pedir_tablon = lambda fiat, tipo, filas_n=20: filas
+def con_tablon(filas, fallo=""):
+    """Sustituye la llamada a Binance por una respuesta fija.
+
+    Devuelve (lista, motivo) porque eso es lo que devuelve la de verdad: hay
+    que poder distinguir "Binance no contesto" de "contesto y ninguno sirve".
+    """
+    main._pedir_tablon = lambda fiat, tipo, filas_n=20: (filas, fallo)
+
+
+def tasa(fiat, tipo, monto):
+    """Solo el dato, para las pruebas a las que el motivo les da igual."""
+    return main._leer_mercado(fiat, tipo, monto)[0]
+
+
+def porque(fiat, tipo, monto):
+    """Solo el motivo."""
+    return main._leer_mercado(fiat, tipo, monto)[1]
 
 
 print("\n== El precio se lee A SU VOLUMEN, no el mejor del tablon ==")
@@ -69,7 +83,7 @@ con_tablon([
     anuncio(5.12, 800, 9000),
     anuncio(5.20, 100000, 500000),  # fuera: pide mas de lo que ella mueve
 ])
-r = main._leer_mercado("BRL", "BUY", 1000)
+r = tasa("BRL", "BUY", 1000)
 ok(r is not None and r["anuncios"] == 2,
    "solo cuentan los anuncios que aceptan su monto", r)
 ok(r and abs(r["tasa"] - 5.11) < 1e-9,
@@ -77,36 +91,70 @@ ok(r and abs(r["tasa"] - 5.11) < 1e-9,
 
 # Con tres, la mediana es la del medio.
 con_tablon([anuncio(5.10, 1, 9999), anuncio(5.12, 1, 9999), anuncio(5.30, 1, 9999)])
-r = main._leer_mercado("BRL", "BUY", 1000)
+r = tasa("BRL", "BUY", 1000)
 ok(r and r["tasa"] == 5.12, "con tres anuncios, el del medio", r and r["tasa"])
 
 print("\n== Un anuncio sin limites NO se supone bueno ==")
 # Sin minimo/maximo no hay forma de saber si acepta su monto. Contarlo seria
 # meter en la mediana un precio que quiza no puede tomar.
 con_tablon([{"adv": {"price": "5.00"}}, anuncio(5.40, 1, 9999)])
-r = main._leer_mercado("BRL", "BUY", 1000)
+r = tasa("BRL", "BUY", 1000)
 ok(r and r["anuncios"] == 1 and r["tasa"] == 5.40,
    "el anuncio sin limites se descarta en vez de suponer que sirve", r)
 
 print("\n== Nada de esto puede reventar ==")
-con_tablon(None)                      # Binance no contesto
-ok(main._leer_mercado("BRL", "BUY", 1000) is None, "si no contesta, devuelve None")
+con_tablon(None, "Binance respondio 403")   # Binance no contesto
+ok(tasa("BRL", "BUY", 1000) is None, "si no contesta, no hay dato")
 con_tablon([])                        # contesto vacio
-ok(main._leer_mercado("BRL", "BUY", 1000) is None, "si viene vacio, tambien")
+ok(tasa("BRL", "BUY", 1000) is None, "si viene vacio, tampoco")
 con_tablon([anuncio(0, 1, 9999), anuncio("abc", 1, 9999), {"adv": "no soy un dict"}, "ni yo"])
-ok(main._leer_mercado("BRL", "BUY", 1000) is None,
+ok(tasa("BRL", "BUY", 1000) is None,
    "con basura dentro no levanta: la descarta toda")
 con_tablon([anuncio(5.10, 5000, 9000)])   # ninguno acepta su monto
-ok(main._leer_mercado("BRL", "BUY", 1000) is None,
+ok(tasa("BRL", "BUY", 1000) is None,
    "si ninguno acepta su monto, no se inventa un precio")
+
+print("\n== Y las dos razones de quedarse sin precio NO son la misma ==")
+# Esto es lo que costo una tarde: la pantalla decia "sin lectura" para las dos
+# y no habia forma de saber si el arreglo era del servidor o de bajar el monto.
+con_tablon(None, "Binance respondio 403")
+m = porque("BRL", "BUY", 1000)
+ok("403" in m, "si Binance corta, se dice el numero que devolvio", m)
+con_tablon([anuncio(5.10, 5000, 9000), anuncio(5.11, 6000, 9000)])
+m = porque("BRL", "BUY", 1000)
+ok("403" not in m and "1.000" in m and "2" in m,
+   "si contesto pero ninguno acepta su monto, se dice cuantos habia y cuanto pidio", m)
+ok(porque("BRL", "BUY", 1000) != main._leer_mercado("BRL", "BUY", 99999999)[1],
+   "y los dos motivos no son el mismo texto")
+con_tablon([])
+m = porque("BRL", "BUY", 1000)
+ok("BRL" in m and "1.000" not in m,
+   "un tablon vacio no se disfraza de problema de monto", m)
+con_tablon([anuncio(5.12, 1, 999999)])
+ok(porque("BRL", "BUY", 1000) == "",
+   "y cuando sale bien no hay motivo que contar")
 
 print("\n== La respuesta al navegador nunca deja la app sin datos ==")
 main._mercado_cache.clear()
-con_tablon(None)
+con_tablon(None, "Binance respondio 403")
 r = main.mercado_p2p()
 ok(r["ok"] is True and r["disponible"] is False,
    "Binance caido -> ok=True y disponible=False, nunca un error", r)
-ok("motivo" in r, "y dice por que")
+ok("403" in r.get("motivo", ""), "y dice por que, con el numero", r.get("motivo"))
+ok("403" in r.get("motivoBRL", "") and "403" in r.get("motivoVES", ""),
+   "cada lado trae el suyo: los reales y los bolivares pueden fallar distinto", r)
+ok(r["motivo"] == r["motivoBRL"],
+   "si los dos fallaron por lo mismo, no se dice dos veces", r["motivo"])
+
+# Media lectura tambien es un fallo: sin las DOS tasas no hay suelo.
+main._mercado_cache.clear()
+main._pedir_tablon = lambda fiat, tipo, filas_n=20: (
+    ([anuncio(5.12, 1, 999999)], "") if fiat == "BRL" else (None, "Binance respondio 429"))
+r = main.mercado_p2p()
+ok(r["disponible"] is True and "motivoBRL" not in r,
+   "el lado que si leyo no arrastra un motivo que no existe", r)
+ok("429" in r.get("motivoVES", ""),
+   "y el que fallo lo dice aunque el otro haya salido bien", r.get("motivoVES"))
 main._mercado_cache.clear()
 con_tablon([anuncio(5.12, 1, 999999)])
 r = main.mercado_p2p()
@@ -132,7 +180,7 @@ llamadas = {"n": 0}
 
 def contar(fiat, tipo, filas_n=20):
     llamadas["n"] += 1
-    return [anuncio(5.12, 1, 999999)]
+    return [anuncio(5.12, 1, 999999)], ""
 
 
 main._pedir_tablon = contar
@@ -151,7 +199,7 @@ vistos = []
 
 def anotar(fiat, tipo, filas_n=20):
     vistos.append((fiat, tipo))
-    return [anuncio(1.0, 1, 999999999)]
+    return [anuncio(1.0, 1, 999999999)], ""
 
 
 main._pedir_tablon = anotar

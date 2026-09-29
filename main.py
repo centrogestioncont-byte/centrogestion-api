@@ -1149,6 +1149,29 @@ MERCADO_MAX_ANUNCIOS = 10   # de los que pasan el filtro, los 10 mejores
 # daria uno que no puede tomar, y publicaria una tasa que no puede sostener.
 MERCADO_MONTO_POR_DEFECTO = {"BRL": 1000.0, "VES": 112000.0}
 
+# Como se presenta ante Binance. Esto NO es cosmetico: el tablon es la misma
+# direccion que carga su pagina y delante tiene un filtro que corta a lo que no
+# parece un navegador. El servidor se presentaba como "centrogestion-api" -que
+# es justo lo que ese filtro busca- y desde el navegador la tarjeta solo decia
+# "sin lectura", sin numero ni nada.
+#
+# No hay forma de probar esto sin salir a internet, ni aqui ni en el CI: la
+# unica prueba de verdad es su servidor desplegado. Por eso el commit anterior
+# va primero: si esto no era, la tarjeta ahora dice que fue.
+#
+# Origin y Referer van porque un navegador de verdad los manda al llamar a esta
+# direccion, y un filtro que mira el User-Agent suele mirarlos tambien.
+MERCADO_CABECERAS = {
+    "Content-Type": "application/json",
+    "Accept": "application/json",
+    "Accept-Language": "es,en;q=0.9",
+    "Origin": "https://p2p.binance.com",
+    "Referer": "https://p2p.binance.com/es/trade/all-payments/USDT",
+    "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                   "AppleWebKit/537.36 (KHTML, like Gecko) "
+                   "Chrome/126.0.0.0 Safari/537.36"),
+}
+
 _mercado_cache = {}
 _mercado_candado = threading.Lock()
 
@@ -1206,12 +1229,12 @@ def _pedir_tablon(fiat, tipo, filas=20):
     cuerpo = json.dumps({
         "fiat": fiat, "asset": "USDT", "tradeType": tipo,
         "page": 1, "rows": filas, "payTypes": [], "publisherType": None,
+        # Lo que manda su propia pagina. Cuesta nada y es una cosa menos por la
+        # que el filtro pueda decir que esto no es un navegador.
+        "clientType": "web",
     }).encode("utf-8")
-    pedido = Request(BINANCE_P2P, data=cuerpo, method="POST", headers={
-        "Content-Type": "application/json",
-        "Accept": "application/json",
-        "User-Agent": "centrogestion-api",
-    })
+    pedido = Request(BINANCE_P2P, data=cuerpo, method="POST",
+                     headers=dict(MERCADO_CABECERAS))
     try:
         with urlopen(pedido, timeout=MERCADO_ESPERA) as r:
             datos = json.loads(r.read().decode("utf-8"))

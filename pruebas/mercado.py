@@ -39,6 +39,10 @@ if "bson" not in sys.modules:
 
 import main  # noqa: E402
 
+# La de verdad, guardada ANTES de que las pruebas la sustituyan por dobles:
+# mas abajo se mira que manda a Binance, y para eso hace falta la original.
+_TABLON_REAL = main._pedir_tablon
+
 fallos = []
 
 
@@ -246,6 +250,51 @@ main._mercado_cache.clear()
 main.mercado_p2p()
 ok(("BRL", "BUY") in vistos, "los reales se leen del lado de quien vende USDT", vistos)
 ok(("VES", "SELL") in vistos, "y los bolivares del lado de quien los compra", vistos)
+
+print("\n== El servidor no se presenta ante Binance como un robot ==")
+# Aqui no hay internet, asi que se mira lo que SE IBA A MANDAR. Basta: lo que
+# el filtro de Binance corta es esto, no lo que conteste despues.
+import json as _json  # noqa: E402
+
+capturado = {}
+
+
+class _RespuestaFalsa:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+    def read(self):
+        return b'{"data": []}'
+
+
+def _urlopen_falso(pedido, timeout=None):
+    capturado["cabeceras"] = dict(pedido.headers)
+    capturado["cuerpo"] = _json.loads(pedido.data.decode("utf-8"))
+    capturado["url"] = pedido.full_url
+    return _RespuestaFalsa()
+
+
+_urlopen_real = main.urlopen
+main.urlopen = _urlopen_falso
+_TABLON_REAL("BRL", "BUY")
+main.urlopen = _urlopen_real
+
+# Request pone las cabeceras en Capitalizado, no como se escribieron.
+cab = {k.lower(): v for k, v in capturado.get("cabeceras", {}).items()}
+ua = cab.get("user-agent", "")
+ok("Mozilla" in ua and "centrogestion" not in ua.lower(),
+   "se presenta como un navegador, no con el nombre de la app", ua)
+ok(cab.get("origin", "").endswith("binance.com"),
+   "y manda el Origin que mandaria su propia pagina", cab.get("origin"))
+ok("referer" in cab and "accept-language" in cab,
+   "con Referer e idioma, como los manda un navegador de verdad", sorted(cab))
+ok(capturado.get("cuerpo", {}).get("clientType") == "web",
+   "y el cuerpo dice que viene de la web", capturado.get("cuerpo"))
+ok(capturado.get("url") == main.BINANCE_P2P,
+   "sin cambiar la direccion del tablon", capturado.get("url"))
 
 print("\n" + ("FALLARON %d prueba(s)" % len(fallos) if fallos else "Todo en orden."))
 sys.exit(1 if fallos else 0)

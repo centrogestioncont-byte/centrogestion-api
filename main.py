@@ -1214,6 +1214,32 @@ def _monto_legible(monto):
         return str(monto)
 
 
+def _porque_vacio(datos, fiat):
+    """El tablon contesto SIN un solo anuncio. Eso hay que contarlo tal cual.
+
+    Un tablon vacio en un mercado grande —Brasil tiene cientos de anuncios a
+    cualquier hora— no es creible: lo normal es que nos esten filtrando en
+    silencio, contestando 200 con la lista vacia en vez de un 403 que se vea.
+    Asi que se repite lo que dijo EL (success, code, message, total) en vez de
+    suponerlo nosotros. Paso el 29/09 con los reales y no habia por donde
+    agarrarlo: la pantalla decia "no tiene anuncios" y eso no se lo cree nadie.
+    """
+    trozos = []
+    if datos.get("success") is False:
+        trozos.append("dice que no tuvo exito")
+    codigo = datos.get("code")
+    if codigo not in (None, "", "000000"):
+        trozos.append("codigo " + _motivo_corto(codigo, 20))
+    mensaje = datos.get("message")
+    if mensaje:
+        trozos.append(_motivo_corto(mensaje, 40))
+    total = datos.get("total")
+    if isinstance(total, (int, float)) and not isinstance(total, bool):
+        trozos.append("total %d" % int(total))
+    base = "Binance devolvio 0 anuncios de %s" % fiat
+    return base + (" (" + " · ".join(trozos) + ")" if trozos else "")
+
+
 def _pedir_tablon(fiat, tipo, filas=20):
     """Una pagina del tablon. Devuelve (lista, motivo del fallo).
 
@@ -1262,6 +1288,10 @@ def _pedir_tablon(fiat, tipo, filas=20):
         if suyo:
             return None, "Binance dijo: %s" % _motivo_corto(suyo)
         return None, "Binance contesto sin lista de anuncios"
+    # La lista vacia trae motivo aunque no sea un fallo de red: lo que hay que
+    # contar solo se ve desde aqui, con el cuerpo de la respuesta delante.
+    if not lista:
+        return lista, _porque_vacio(datos, fiat)
     return lista, ""
 
 
@@ -1299,7 +1329,7 @@ def _leer_mercado(fiat, tipo, monto):
             break
     if not precios:
         if not crudo:
-            return None, "Binance no tiene anuncios de %s ahora mismo" % fiat
+            return None, fallo or ("Binance no tiene anuncios de %s ahora mismo" % fiat)
         # Este es el que ella puede arreglar sola, asi que se dice con sus
         # numeros: cuantos habia y cuanto pidio.
         return None, ("de los %d anuncios de %s, ninguno acepta %s"

@@ -66,7 +66,7 @@ def con_tablon(filas, fallo=""):
     Devuelve (lista, motivo) porque eso es lo que devuelve la de verdad: hay
     que poder distinguir "Binance no contesto" de "contesto y ninguno sirve".
     """
-    main._pedir_tablon = lambda fiat, tipo, filas_n=20: (filas, fallo)
+    main._pedir_tablon = lambda fiat, tipo, *a, **k: (filas, fallo)
 
 
 def tasa(fiat, tipo, monto):
@@ -182,7 +182,7 @@ main._mercado_cache.clear()
 llamadas = {"n": 0}
 
 
-def contar(fiat, tipo, filas_n=20):
+def contar(fiat, tipo, *a, **k):
     llamadas["n"] += 1
     return [anuncio(5.12, 1, 999999)], ""
 
@@ -202,7 +202,7 @@ main._mercado_cache.clear()
 fallos_n = {"n": 0}
 
 
-def fallar(fiat, tipo, filas_n=20):
+def fallar(fiat, tipo, *a, **k):
     fallos_n["n"] += 1
     return None, "Binance respondio 403"
 
@@ -240,7 +240,7 @@ print("\n== Las dos direcciones no se confunden ==")
 vistos = []
 
 
-def anotar(fiat, tipo, filas_n=20):
+def anotar(fiat, tipo, *a, **k):
     vistos.append((fiat, tipo))
     return [anuncio(1.0, 1, 999999999)], ""
 
@@ -250,6 +250,31 @@ main._mercado_cache.clear()
 main.mercado_p2p()
 ok(("BRL", "BUY") in vistos, "los reales se leen del lado de quien vende USDT", vistos)
 ok(("VES", "SELL") in vistos, "y los bolivares del lado de quien los compra", vistos)
+
+print("\n== Un tablon VACIO se cuenta con lo que dijo Binance ==")
+# Brasil tiene cientos de anuncios a cualquier hora: un tablon vacio no es
+# creible, y "no tiene anuncios" no se lo cree nadie. Se repite lo que dijo EL.
+m = main._porque_vacio({"success": False, "code": "000002",
+                        "message": "rate limited", "total": 0}, "BRL")
+ok("BRL" in m, "se dice de que moneda era el tablon", m)
+ok("no tuvo exito" in m, "y que Binance dijo que no tuvo exito", m)
+ok("000002" in m, "con su codigo", m)
+ok("rate limited" in m, "y su mensaje", m)
+ok("total 0" in m, "y el total que declaro", m)
+# Lo normal cuando de verdad no hay nada: exito, sin codigo raro, total 0.
+m = main._porque_vacio({"success": True, "code": "000000",
+                        "message": None, "total": 0}, "VES")
+ok("000000" not in m and "VES" in m and "total 0" in m,
+   "un vacio limpio no inventa codigos que no vinieron", m)
+# Un total booleano no es un total.
+m = main._porque_vacio({"total": True}, "BRL")
+ok("total" not in m, "un true no se cuenta como un total", m)
+
+# Y ese motivo tiene que llegar hasta arriba, no quedarse por el camino.
+main._pedir_tablon = lambda fiat, tipo, *a, **k: (
+    [], "Binance devolvio 0 anuncios de BRL (codigo 000002)")
+ok("000002" in main._leer_mercado("BRL", "BUY", 1000)[1],
+   "y el motivo del tablon vacio llega hasta la tarjeta", main._leer_mercado("BRL", "BUY", 1000)[1])
 
 print("\n== El servidor no se presenta ante Binance como un robot ==")
 # Aqui no hay internet, asi que se mira lo que SE IBA A MANDAR. Basta: lo que

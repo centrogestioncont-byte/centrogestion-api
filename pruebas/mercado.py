@@ -37,6 +37,8 @@ if "bson" not in sys.modules:
     sys.modules["bson"] = falso_bson
     sys.modules["bson.errors"] = errores_bson
 
+from urllib.error import HTTPError  # noqa: E402
+
 import main  # noqa: E402
 
 # La de verdad, guardada ANTES de que las pruebas la sustituyan por dobles:
@@ -148,13 +150,13 @@ con_tablon([anuncio(5.12, 1, 999999)])
 ok(porque("BRL", "BUY", 1000) == "",
    "y cuando sale bien no hay motivo que contar")
 
-print("\n== Los reales salen del mercado normal, no del P2P ==")
-# El tablon P2P de reales viene vacio para este servidor en las DOS
-# direcciones. Pero USDT/BRL es un par de verdad en el mercado normal de
-# Binance, y ese precio es publico.
+print("\n== El precio de los reales: el primer sitio que conteste ==")
+# Su servidor esta en Railway EE.UU. y Binance le devuelve 451 —"bloqueado por
+# tu pais"— tanto en el mercado normal como vaciandole el tablon P2P. Cambiar
+# de region es de pago y su plan no lo tiene, asi que hay que ir a otro sitio.
 
 
-class _SpotFalso:
+class _RespFalsa:
     def __init__(self, cuerpo):
         self.cuerpo = cuerpo
 
@@ -168,41 +170,84 @@ class _SpotFalso:
         return self.cuerpo
 
 
-spot_pedido = {}
-
-
-def spot_ok(pedido, timeout=None):
-    spot_pedido["url"] = pedido.full_url
-    spot_pedido["cabeceras"] = dict(pedido.headers)
-    return _SpotFalso(b'{"symbol":"USDTBRL","price":"5.2713"}')
-
-
 _urlopen_guardado = main.urlopen
-main.urlopen = spot_ok
+
+
+def con_fuentes(respuestas):
+    """respuestas: {trozo de la url -> cuerpo en bytes, o una excepcion}."""
+    visitadas = []
+
+    def falso(pedido, timeout=None):
+        url = pedido.full_url
+        visitadas.append(url)
+        for trozo, que in respuestas.items():
+            if trozo in url:
+                if isinstance(que, Exception):
+                    raise que
+                return _RespFalsa(que)
+        raise RuntimeError("nadie contesta")
+
+    main.urlopen = falso
+    return visitadas
+
+
+# Las tres formas en que cada sitio envuelve el precio.
+ok(main._precio_de({"price": "5.27"}) == 5.27, "se entiende la forma de Binance")
+ok(main._precio_de({"tether": {"brl": 5.2713}}) == 5.2713,
+   "y la de CoinGecko, que lo mete dentro")
+ok(main._precio_de([{"pair": "USDT-BRL", "last": "5.28"}]) == 5.28,
+   "y la de Mercado Bitcoin, que manda una lista")
+ok(main._precio_de({"algo": "otra cosa"}) is None,
+   "y una forma que no se conoce no se adivina")
+
+# Binance contesta -> se queda con Binance y no molesta a los demas.
+visitadas = con_fuentes({"binance": b'{"price":"5.27"}'})
 r, motivo = main._precio_spot("BRL")
 main.urlopen = _urlopen_guardado
-ok(r and r["tasa"] == 5.2713, "el precio de USDT en reales sale del mercado", r)
-ok(r and r["fuente"] == "mercado", "y se dice de donde salio", r)
-ok(motivo == "", "sin motivo que contar", motivo)
-ok("USDTBRL" in spot_pedido.get("url", ""), "se pide el par USDTBRL", spot_pedido.get("url"))
-cab = {k.lower(): v for k, v in spot_pedido.get("cabeceras", {}).items()}
-ok("origin" not in cab, "al mercado normal no se le manda el Origin del P2P", sorted(cab))
-ok("Mozilla" in cab.get("user-agent", ""), "pero si el mismo navegador", cab.get("user-agent"))
+ok(r and r["tasa"] == 5.27 and r["fuente"] == "Binance",
+   "con Binance sano, el precio es el suyo", r)
+ok(len(visitadas) == 1, "y a los otros sitios ni se les pregunta", visitadas)
 
-# Bolivares no tiene par: ahi el P2P es el unico sitio y se dice asi.
+# Binance da 451 -> sigue al siguiente.
+visitadas = con_fuentes({
+    "binance": HTTPError("u", 451, "Unavailable For Legal Reasons", {}, None),
+    "coingecko": b'{"tether":{"brl":5.2713}}',
+})
+r, motivo = main._precio_spot("BRL")
+main.urlopen = _urlopen_guardado
+ok(r and r["tasa"] == 5.2713 and r["fuente"] == "CoinGecko",
+   "si Binance bloquea por pais, se va al siguiente sitio", r)
+ok(any("coingecko" in u for u in visitadas), "que si se le pregunta", visitadas)
+
+# Los dos primeros caen -> el tercero.
+visitadas = con_fuentes({
+    "binance": HTTPError("u", 451, "x", {}, None),
+    "coingecko": HTTPError("u", 429, "x", {}, None),
+    "mercadobitcoin": b'[{"pair":"USDT-BRL","last":"5.29"}]',
+})
+r, motivo = main._precio_spot("BRL")
+main.urlopen = _urlopen_guardado
+ok(r and r["tasa"] == 5.29 and r["fuente"] == "Mercado Bitcoin",
+   "y si caen dos, el tercero", r)
+
+# Si caen las tres, se dice lo que contesto CADA una: eso es lo que decide que
+# hacer despues, y el 451 hay que poder leerlo tal cual.
+con_fuentes({
+    "binance": HTTPError("u", 451, "x", {}, None),
+    "coingecko": HTTPError("u", 403, "x", {}, None),
+    "mercadobitcoin": HTTPError("u", 500, "x", {}, None),
+})
+r, motivo = main._precio_spot("BRL")
+main.urlopen = _urlopen_guardado
+ok(r is None, "sin ninguna, no se inventa precio", r)
+ok("Binance respondio 451" in motivo, "y se lee el 451 tal cual", motivo)
+ok("CoinGecko respondio 403" in motivo and "Mercado Bitcoin respondio 500" in motivo,
+   "con lo que dijo cada uno, no solo el primero", motivo)
+
+# Bolivares no tiene mercado fuera del P2P.
 r, motivo = main._precio_spot("VES")
-ok(r is None and "no lista VES" in motivo,
-   "para bolivares no hay par de mercado, y se dice", motivo)
-
-# Nada de esto puede reventar.
-def spot_basura(pedido, timeout=None):
-    return _SpotFalso(b'{"symbol":"USDTBRL"}')
-
-
-main.urlopen = spot_basura
-r, motivo = main._precio_spot("BRL")
-main.urlopen = _urlopen_guardado
-ok(r is None and "no dio precio" in motivo, "sin precio dentro, no se inventa", motivo)
+ok(r is None and "fuera del P2P" in motivo,
+   "para bolivares no hay mercado normal, y se dice", motivo)
 
 print("\n== Y el P2P de reales solo se prueba si el mercado falla ==")
 main._mercado_cache.clear()
@@ -215,10 +260,10 @@ def anota_p2p(fiat, tipo, filas_n=20, sencillo=False):
 
 
 main._pedir_tablon = anota_p2p
-main.urlopen = spot_ok
+con_fuentes({"binance": b'{"price":"5.2713"}'})
 r = main.mercado_p2p()
 main.urlopen = _urlopen_guardado
-ok(r["compraBRL"]["tasa"] == 5.2713 and r["compraBRL"]["fuente"] == "mercado",
+ok(r["compraBRL"]["tasa"] == 5.2713 and r["compraBRL"]["fuente"] == "Binance",
    "los reales vienen del mercado", r["compraBRL"])
 ok("BRL" not in pedidos_p2p,
    "y al P2P de reales ni se le pregunta: esa puerta esta cerrada", pedidos_p2p)
@@ -238,18 +283,14 @@ def solo_ves(fiat, tipo, filas_n=20, sencillo=False):
     return [anuncio(957, 1, 999999)], ""
 
 
-def spot_cae(pedido, timeout=None):
-    raise RuntimeError("sin red")
-
-
 main._pedir_tablon = solo_ves
-main.urlopen = spot_cae
+con_fuentes({})          # ningun sitio contesta
 r = main.mercado_p2p()
 main.urlopen = _urlopen_guardado
 ok("BRL" in pedidos_p2p2, "si el mercado falla, SI se prueba el P2P", pedidos_p2p2)
 m = r.get("motivoBRL", "")
-ok("no se entiende" in m or "no se llego" in m,
-   "y se cuenta lo que dijo el mercado", m)
+ok("Binance" in m and "CoinGecko" in m,
+   "y se cuenta lo que dijo cada sitio del mercado", m)
 ok("y el P2P:" in m, "y tambien lo que dijo el P2P", m)
 
 print("\n== La respuesta al navegador nunca deja la app sin datos ==")

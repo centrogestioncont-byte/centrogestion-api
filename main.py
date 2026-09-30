@@ -1144,6 +1144,28 @@ BINANCE_P2P = "https://p2p.binance.com/bapi/c2c/v2/friendly/c2c/adv/search"
 # unico sitio donde existe ese precio, y ese si funciona.
 BINANCE_SPOT = "https://api.binance.com/api/v3/ticker/price"
 SPOT_POR_MONEDA = {"BRL": "USDTBRL"}
+
+# Y si Binance no contesta, OTROS SITIOS. Su servidor esta en Railway EE.UU. y
+# Binance le devuelve 451 —"bloqueado por tu pais"— en el mercado normal, igual
+# que le vacia el tablon P2P de reales. Cambiar de region es un ajuste de pago
+# que su plan no tiene, asi que el precio hay que buscarlo donde si conteste.
+#
+# USDT/BRL es de los mercados mas liquidos que hay: entre un sitio y otro la
+# diferencia es de decimas de por ciento. Para un SUELO —hasta donde puede
+# ofrecer sin perder— eso vale de sobra. Lo que no vale es callar de donde
+# salio, y por eso cada lectura trae su "fuente" y la pantalla la enseña.
+#
+# El orden importa: Binance primero, porque es donde ella opera de verdad.
+FUENTES_BRL = [
+    ("Binance", BINANCE_SPOT + "?symbol=USDTBRL"),
+    ("CoinGecko", "https://api.coingecko.com/api/v3/simple/price"
+                  "?ids=tether&vs_currencies=brl"),
+    ("Mercado Bitcoin", "https://api.mercadobitcoin.net/api/v4/tickers"
+                        "?symbols=USDT-BRL"),
+]
+# Mas corto que el del P2P: son tres seguidas, y si las tres se cuelgan la
+# pantalla se queda esperando. Con 4s el peor caso son 12, no 18.
+MERCADO_ESPERA_FUENTE = 4
 MERCADO_ESPERA = 6          # segundos; si tarda mas, se responde sin lectura
 MERCADO_CACHE_SEG = 300     # 5 min: ella abre la pantalla muchas veces al dia
 # Un FALLO no se guarda cinco minutos. El boton de la tarjeta dice "reintentar"
@@ -1239,33 +1261,69 @@ MERCADO_CABECERAS_SPOT = {
 }
 
 
-def _precio_spot(fiat):
-    """El precio de 1 USDT en esa moneda, del mercado normal de Binance.
+def _precio_de(datos):
+    """El precio dentro de la respuesta, venga en la forma que venga.
 
-    Devuelve ({tasa, fuente}, "") o (None, motivo). No lleva anuncios ni monto:
-    en el mercado normal no hay anuncio que aceptar, el precio es uno solo.
+    Cada sitio lo envuelve distinto y no hay contrato: se prueban las tres
+    formas conocidas y si ninguna encaja se devuelve nada, en vez de adivinar.
+
+      Binance          {"price": "5.27"}
+      CoinGecko        {"tether": {"brl": 5.27}}
+      Mercado Bitcoin  [{"pair": "USDT-BRL", "last": "5.27"}]
     """
-    par = SPOT_POR_MONEDA.get(fiat)
-    if not par:
-        return None, "Binance no lista %s en su mercado normal" % fiat
-    pedido = Request(BINANCE_SPOT + "?symbol=" + par,
-                     headers=dict(MERCADO_CABECERAS_SPOT))
+    if isinstance(datos, list):
+        datos = datos[0] if datos and isinstance(datos[0], dict) else None
+    if not isinstance(datos, dict):
+        return None
+    directo = _num_o_none(datos.get("price")) or _num_o_none(datos.get("last"))
+    if directo:
+        return directo
+    dentro = datos.get("tether")
+    if isinstance(dentro, dict):
+        return _num_o_none(dentro.get("brl"))
+    return None
+
+
+def _pedir_precio(url):
+    """Una fuente. Devuelve (precio, motivo del fallo)."""
+    pedido = Request(url, headers=dict(MERCADO_CABECERAS_SPOT))
     try:
-        with urlopen(pedido, timeout=MERCADO_ESPERA) as r:
+        with urlopen(pedido, timeout=MERCADO_ESPERA_FUENTE) as r:
             datos = json.loads(r.read().decode("utf-8"))
     except HTTPError as err:
-        return None, "el mercado de %s respondio %s" % (fiat, err.code)
+        # 451 es "bloqueado por tu pais" y es EL caso: conviene que se lea tal
+        # cual en la pantalla, porque no se arregla con codigo.
+        return None, "respondio %s" % err.code
     except TimeoutError:
-        return None, "el mercado de %s tardo mas de %ss" % (fiat, MERCADO_ESPERA)
+        return None, "tardo mas de %ss" % MERCADO_ESPERA_FUENTE
     except URLError as err:
-        return None, ("no se llego al mercado de %s (%s)"
-                      % (fiat, _motivo_corto(err.reason)))
+        return None, "no se llego (%s)" % _motivo_corto(err.reason, 40)
     except Exception:
-        return None, "el mercado de %s contesto algo que no se entiende" % fiat
-    precio = _num_o_none(datos.get("price")) if isinstance(datos, dict) else None
+        return None, "contesto algo que no se entiende"
+    precio = _precio_de(datos)
     if precio is None:
-        return None, "el mercado de %s no dio precio" % fiat
-    return {"tasa": round(precio, 4), "fuente": "mercado"}, ""
+        return None, "no dio precio"
+    return precio, ""
+
+
+def _precio_spot(fiat):
+    """El precio de 1 USDT en esa moneda, del primer sitio que conteste.
+
+    Devuelve ({tasa, fuente}, "") o (None, motivo con lo que dijo CADA uno).
+    No lleva anuncios ni monto: aqui no hay anuncio que aceptar, el precio es
+    uno solo.
+    """
+    if fiat != "BRL":
+        return None, "no hay mercado de %s fuera del P2P" % fiat
+    fallos = []
+    for nombre, url in FUENTES_BRL:
+        precio, fallo = _pedir_precio(url)
+        if precio:
+            return {"tasa": round(precio, 4), "fuente": nombre}, ""
+        fallos.append("%s %s" % (nombre, fallo))
+    # Se cuentan TODAS, no solo la primera: cual conteste y cual no es
+    # justamente lo que hay que saber para decidir que hacer despues.
+    return None, " · ".join(fallos)
 
 
 def _porque_vacio(datos, fiat):

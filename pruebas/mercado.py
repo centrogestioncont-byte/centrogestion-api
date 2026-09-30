@@ -114,9 +114,9 @@ ok(tasa("BRL", "BUY", 1000) is None, "si viene vacio, tampoco")
 con_tablon([anuncio(0, 1, 9999), anuncio("abc", 1, 9999), {"adv": "no soy un dict"}, "ni yo"])
 ok(tasa("BRL", "BUY", 1000) is None,
    "con basura dentro no levanta: la descarta toda")
-con_tablon([anuncio(5.10, 5000, 9000)])   # ninguno acepta su monto
+con_tablon([{"adv": {"price": "5.10"}}])   # sin limites: no se puede saber
 ok(tasa("BRL", "BUY", 1000) is None,
-   "si ninguno acepta su monto, no se inventa un precio")
+   "si ningun anuncio dice sus limites, no se inventa un precio")
 
 print("\n== Y las dos razones de quedarse sin precio NO son la misma ==")
 # Esto es lo que costo una tarde: la pantalla decia "sin lectura" para las dos
@@ -124,12 +124,10 @@ print("\n== Y las dos razones de quedarse sin precio NO son la misma ==")
 con_tablon(None, "Binance respondio 403")
 m = porque("BRL", "BUY", 1000)
 ok("403" in m, "si Binance corta, se dice el numero que devolvio", m)
-con_tablon([anuncio(5.10, 5000, 9000), anuncio(5.11, 6000, 9000)])
+con_tablon([{"adv": {"price": "5.10"}}, {"adv": {"price": "5.11"}}])
 m = porque("BRL", "BUY", 1000)
-ok("403" not in m and "1.000" in m and "2" in m,
-   "si contesto pero ninguno acepta su monto, se dice cuantos habia y cuanto pidio", m)
-ok(porque("BRL", "BUY", 1000) != main._leer_mercado("BRL", "BUY", 99999999)[1],
-   "y los dos motivos no son el mismo texto")
+ok("403" not in m and "2" in m and "límites" in m,
+   "si contesto pero ninguno dice sus limites, se dice cuantos habia", m)
 con_tablon([])
 m = porque("BRL", "BUY", 1000)
 ok("BRL" in m and "1.000" not in m,
@@ -277,6 +275,44 @@ main._pedir_tablon = lambda fiat, tipo, *a, **k: (
     [], "Binance devolvio 0 anuncios de BRL (codigo 000002)")
 ok("000002" in main._leer_mercado("BRL", "BUY", 1000)[1],
    "y el motivo del tablon vacio llega hasta la tarjeta", main._leer_mercado("BRL", "BUY", 1000)[1])
+
+print("\n== Si ninguno acepta su monto, se baja al mayor que SI esten dando ==")
+# El tablon SE MUEVE: el 29/09 por la noche dos anuncios de VES aceptaban sus
+# 112.000 Bs; a la mañana siguiente habia 20 y ninguno. Quedarse sin numero es
+# peor que dar uno diciendo a que monto se midio.
+con_tablon([anuncio(950, 1000, 40000), anuncio(957, 1000, 45000),
+            anuncio(960, 1000, 50000), anuncio(970, 1000, 30000)])
+r = tasa("VES", "SELL", 112000)
+ok(r is not None, "ya no se queda sin lectura", r)
+ok(r and r["montoPedido"] == 112000,
+   "y dice cual era el monto que se pidio", r)
+ok(r and r["monto"] == 40000,
+   "se mide al mayor monto que aceptan varios, no al del anuncio mas grande", r)
+ok(r and r["anuncios"] == 3,
+   "que son los que de verdad lo aceptan", r)
+# 50.000 lo acepta UNO solo, 45.000 dos, 40.000 tres. Con el minimo en 3, gana
+# 40.000: leer un anuncio es leer "el mejor precio del tablon", que no sirve.
+ok(main.MERCADO_MIN_ANUNCIOS == 3, "y el minimo son 3 anuncios")
+
+# Si ni bajando llegan a 3, se cae al mayor que acepte aunque sea uno: mejor un
+# numero con su monto escrito que ninguno.
+con_tablon([anuncio(950, 1000, 40000), anuncio(957, 1000, 45000)])
+r = tasa("VES", "SELL", 112000)
+ok(r and r["monto"] == 40000 and r["anuncios"] == 2,
+   "con menos de tres, manda el que tenga MAS anuncios, no el monto mas alto", r)
+con_tablon([anuncio(950, 1000, 40000)])
+r = tasa("VES", "SELL", 112000)
+ok(r and r["monto"] == 40000 and r["anuncios"] == 1,
+   "y con uno solo, ese, pero con su monto a la vista", r)
+
+# Lo que NO puede pasar: que una lectura normal arrastre montoPedido, ni que se
+# baje el monto cuando el suyo si se puede tomar.
+con_tablon([anuncio(950, 1000, 999999), anuncio(957, 1000, 999999),
+            anuncio(960, 1000, 999999)])
+r = tasa("VES", "SELL", 112000)
+ok(r and r["monto"] == 112000 and "montoPedido" not in r,
+   "si su monto SI se puede tomar, no se baja ni se marca nada", r)
+ok(r and r["tasa"] == 957, "y el precio sigue siendo la mediana", r)
 
 print("\n== Un lado vacio se vuelve a pedir UNA vez, con la pregunta simple ==")
 vistas = []

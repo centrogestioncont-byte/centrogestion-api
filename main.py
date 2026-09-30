@@ -1335,33 +1335,40 @@ def _precios_a(anuncios, monto):
             if minimo <= monto <= maximo]
 
 
-def _monto_alcanzable(anuncios):
-    """El mayor monto que todavia acepta un puñado de anuncios.
+def _monto_alcanzable(anuncios, pedido):
+    """El monto mas CERCANO al suyo que todavia acepten varios anuncios.
 
-    Existe porque el tablon SE MUEVE durante el dia. El 29/09 por la noche dos
-    anuncios de VES aceptaban sus 112.000 Bs y salio la lectura; a la mañana
-    siguiente habia 20 anuncios y NINGUNO los aceptaba, asi que la pantalla se
-    quedo sin numero. Un numero que dice a que monto se midio vale; cero
-    numeros, no.
+    Cercano, no el mas grande. La primera version buscaba solo entre los
+    MAXIMOS y hacia abajo desde el techo del tablon, dando por hecho que si su
+    monto no entraba era por pasarse. El 30/09 paso lo contrario: los anuncios
+    de VES pedian MINIMOS por encima de sus 112.000 Bs —su operacion era
+    demasiado PEQUEÑA— y la busqueda acabo en 36.450.000 Bs, unos 38.000 USDT.
+    Le midio el precio de un mercado en el que no opera, y de ahi salia un
+    suelo optimista, que es peor que ninguno.
 
-    Lo que NO se hace es coger el anuncio mas grande y ya: eso es leer UNO, que
-    es lo mismo que leer "el mejor precio del tablon". Se busca el mayor monto
-    que todavia acepten varios (MERCADO_MIN_ANUNCIOS), y solo si ninguno llega
-    a esa cuenta se cae al mayor que acepte aunque sea uno.
+    Reproducido con un tablon como el suyo: a 112.000 lo aceptaban 0 anuncios,
+    esto elegia 50.000.000 (4 anuncios) y 200.000 lo aceptaban 8.
+
+    Ahora se miran los minimos Y los maximos —son los unicos montos donde
+    cambia quien acepta— y gana el que menos se aleje del suyo, hacia arriba o
+    hacia abajo. Sigue sin valer leer UN anuncio: eso es leer "el mejor precio
+    del tablon". Si ninguno llega a MERCADO_MIN_ANUNCIOS, manda el que tenga
+    mas, y entre iguales el mas cercano.
     """
-    candidatos = sorted({maximo for (_, _, maximo) in anuncios}, reverse=True)
-    mejor = None                      # (cuantos, monto)
-    for monto in candidatos:
+    candidatos = set()
+    for (_, minimo, maximo) in anuncios:
+        candidatos.add(minimo)
+        candidatos.add(maximo)
+    mejor = None                      # (cuantos, -distancia, monto)
+    for monto in sorted(candidatos):
         cuantos = len(_precios_a(anuncios, monto))
-        if cuantos >= MERCADO_MIN_ANUNCIOS:
-            return monto              # el mayor que ya vale: no hay que seguir
-        # Si ninguno llega a la cuenta, manda el que tenga MAS anuncios, no el
-        # monto mas alto. Es la misma razon por la que existe el minimo: dos
-        # anuncios dicen mas del mercado que uno, aunque sea por menos dinero.
-        # Como los candidatos van de mayor a menor, el ">" estricto deja el
-        # monto mas alto cuando empatan.
-        if cuantos and (mejor is None or cuantos > mejor[0]):
-            mejor = (cuantos, monto)
+        if not cuantos:
+            continue
+        # Con la cuenta hecha, lo unico que importa es la cercania; por debajo
+        # de la cuenta, primero mas anuncios y despues la cercania.
+        marca = (min(cuantos, MERCADO_MIN_ANUNCIOS), -abs(monto - pedido))
+        if mejor is None or marca > mejor[0]:
+            mejor = (marca, monto)
     return mejor[1] if mejor else None
 
 
@@ -1443,7 +1450,7 @@ def _leer_mercado(fiat, tipo, monto):
     precios = _precios_a(anuncios, monto)
     usado = monto
     if not precios:
-        usado = _monto_alcanzable(anuncios)
+        usado = _monto_alcanzable(anuncios, monto)
         precios = _precios_a(anuncios, usado) if usado else []
     if not precios:
         return None, ("de los %d anuncios de %s, ninguno acepta %s"

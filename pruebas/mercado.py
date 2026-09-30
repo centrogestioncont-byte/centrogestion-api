@@ -286,24 +286,44 @@ r = tasa("VES", "SELL", 112000)
 ok(r is not None, "ya no se queda sin lectura", r)
 ok(r and r["montoPedido"] == 112000,
    "y dice cual era el monto que se pidio", r)
+# 50.000 lo acepta uno, 45.000 dos, 40.000 tres: gana 40.000, que es el mas
+# cercano a sus 112.000 de los que llegan a la cuenta.
 ok(r and r["monto"] == 40000,
-   "se mide al mayor monto que aceptan varios, no al del anuncio mas grande", r)
+   "se baja al monto mas CERCANO al suyo que acepten tres", r)
 ok(r and r["anuncios"] == 3,
    "que son los que de verdad lo aceptan", r)
-# 50.000 lo acepta UNO solo, 45.000 dos, 40.000 tres. Con el minimo en 3, gana
-# 40.000: leer un anuncio es leer "el mejor precio del tablon", que no sirve.
 ok(main.MERCADO_MIN_ANUNCIOS == 3, "y el minimo son 3 anuncios")
 
-# Si ni bajando llegan a 3, se cae al mayor que acepte aunque sea uno: mejor un
-# numero con su monto escrito que ninguno.
+# EL CASO DEL 30/09, que es el que costo: su monto era demasiado PEQUEÑO, no
+# grande. Los anuncios de VES pedian minimos por encima de sus 112.000 Bs y la
+# primera version se fue al techo del tablon —36.450.000 Bs, unos 38.000 USDT—,
+# midiendole un mercado en el que no opera.
+con_tablon([anuncio(950, 200000, 20000000), anuncio(952, 200000, 30000000),
+            anuncio(954, 200000, 50000000), anuncio(956, 5000000, 50000000),
+            anuncio(958, 5000000, 50000000)])
+r = tasa("VES", "SELL", 112000)
+ok(r and r["monto"] == 200000,
+   "si su monto es demasiado PEQUEÑO se sube lo justo, no al techo del tablon", r)
+ok(r and r["anuncios"] == 3, "con los que de verdad lo aceptan ahi", r)
+
+# Si ni acercandose llegan a 3, manda el que tenga MAS anuncios; entre iguales,
+# el mas cercano al suyo.
 con_tablon([anuncio(950, 1000, 40000), anuncio(957, 1000, 45000)])
 r = tasa("VES", "SELL", 112000)
 ok(r and r["monto"] == 40000 and r["anuncios"] == 2,
-   "con menos de tres, manda el que tenga MAS anuncios, no el monto mas alto", r)
+   "con menos de tres, manda el que tenga MAS anuncios", r)
 con_tablon([anuncio(950, 1000, 40000)])
 r = tasa("VES", "SELL", 112000)
 ok(r and r["monto"] == 40000 and r["anuncios"] == 1,
    "y con uno solo, ese, pero con su monto a la vista", r)
+# Con la misma cantidad de anuncios arriba y abajo, gana el lado mas cercano.
+con_tablon([anuncio(950, 10000, 50000), anuncio(951, 10000, 50000),
+            anuncio(952, 10000, 50000),
+            anuncio(960, 900000, 9000000), anuncio(961, 900000, 9000000),
+            anuncio(962, 900000, 9000000)])
+r = tasa("VES", "SELL", 112000)
+ok(r and r["monto"] == 50000,
+   "y empatados en anuncios, gana el monto que menos se aleja del suyo", r)
 
 # Lo que NO puede pasar: que una lectura normal arrastre montoPedido, ni que se
 # baje el monto cuando el suyo si se puede tomar.

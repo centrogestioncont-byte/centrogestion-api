@@ -1132,6 +1132,18 @@ def restaurar_respaldo(archivo):
 # Para VENEZUELA no hay alternativa: Binance no tiene par al contado USDT/VES.
 # El unico sitio donde existe ese precio es este tablon.
 BINANCE_P2P = "https://p2p.binance.com/bapi/c2c/v2/friendly/c2c/adv/search"
+# El mercado NORMAL de Binance, que no es el P2P. Aqui USDT/BRL es un par como
+# cualquier otro y su precio es publico, sin filtro de pais.
+#
+# Existe porque el tablon P2P de reales viene VACIO para este servidor en las
+# DOS direcciones —comprobado el 30/09 con el sondeo, y con la pregunta simple
+# tambien—, mientras el de bolivares, desde la misma maquina, trae anuncios.
+# Esa puerta esta cerrada y no se va a abrir. Esta es otra.
+#
+# Para bolivares no hay par de mercado: Binance no lista VES. Ahi el P2P es el
+# unico sitio donde existe ese precio, y ese si funciona.
+BINANCE_SPOT = "https://api.binance.com/api/v3/ticker/price"
+SPOT_POR_MONEDA = {"BRL": "USDTBRL"}
 MERCADO_ESPERA = 6          # segundos; si tarda mas, se responde sin lectura
 MERCADO_CACHE_SEG = 300     # 5 min: ella abre la pantalla muchas veces al dia
 # Un FALLO no se guarda cinco minutos. El boton de la tarjeta dice "reintentar"
@@ -1218,6 +1230,42 @@ def _monto_legible(monto):
         return "{:,.0f}".format(float(monto)).replace(",", ".")
     except (TypeError, ValueError):
         return str(monto)
+
+
+MERCADO_CABECERAS_SPOT = {
+    "Accept": "application/json",
+    "Accept-Language": "es,en;q=0.9",
+    "User-Agent": MERCADO_CABECERAS["User-Agent"],
+}
+
+
+def _precio_spot(fiat):
+    """El precio de 1 USDT en esa moneda, del mercado normal de Binance.
+
+    Devuelve ({tasa, fuente}, "") o (None, motivo). No lleva anuncios ni monto:
+    en el mercado normal no hay anuncio que aceptar, el precio es uno solo.
+    """
+    par = SPOT_POR_MONEDA.get(fiat)
+    if not par:
+        return None, "Binance no lista %s en su mercado normal" % fiat
+    pedido = Request(BINANCE_SPOT + "?symbol=" + par,
+                     headers=dict(MERCADO_CABECERAS_SPOT))
+    try:
+        with urlopen(pedido, timeout=MERCADO_ESPERA) as r:
+            datos = json.loads(r.read().decode("utf-8"))
+    except HTTPError as err:
+        return None, "el mercado de %s respondio %s" % (fiat, err.code)
+    except TimeoutError:
+        return None, "el mercado de %s tardo mas de %ss" % (fiat, MERCADO_ESPERA)
+    except URLError as err:
+        return None, ("no se llego al mercado de %s (%s)"
+                      % (fiat, _motivo_corto(err.reason)))
+    except Exception:
+        return None, "el mercado de %s contesto algo que no se entiende" % fiat
+    precio = _num_o_none(datos.get("price")) if isinstance(datos, dict) else None
+    if precio is None:
+        return None, "el mercado de %s no dio precio" % fiat
+    return {"tasa": round(precio, 4), "fuente": "mercado"}, ""
 
 
 def _porque_vacio(datos, fiat):
@@ -1484,9 +1532,20 @@ def mercado_p2p(montos=None):
                     else MERCADO_CACHE_FALLO_SEG)
             if (ahora_seg - guardado[0]) < vida:
                 return guardado[1]
-    # Ella COMPRA USDT con reales -> mira a quien los vende (BUY).
-    # Ella VENDE USDT por bolivares -> mira a quien los compra (SELL).
-    compra, fallo_brl = _leer_mercado("BRL", "BUY", brl)
+    # Los REALES salen del mercado normal (USDT/BRL es un par de verdad). El
+    # P2P de reales esta cerrado para este servidor y no va a volver, asi que
+    # ni se le pregunta mientras el mercado conteste.
+    compra, fallo_brl = _precio_spot("BRL")
+    if compra is None:
+        # Solo si el mercado falla se prueba el P2P: por si algun dia se abre,
+        # y porque su motivo dice mas que quedarse a medias.
+        compra_p2p, fallo_p2p = _leer_mercado("BRL", "BUY", brl)
+        if compra_p2p:
+            compra, fallo_brl = compra_p2p, ""
+        else:
+            fallo_brl = "%s · y el P2P: %s" % (fallo_brl, fallo_p2p)
+    # Ella VENDE USDT por bolivares -> mira a quien los compra (SELL). Aqui el
+    # P2P es el unico sitio: Binance no lista VES.
     venta, fallo_ves = _leer_mercado("VES", "SELL", ves)
     fuera = {
         "ok": True,

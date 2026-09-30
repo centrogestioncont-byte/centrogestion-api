@@ -43,6 +43,16 @@ import main  # noqa: E402
 # mas abajo se mira que manda a Binance, y para eso hace falta la original.
 _TABLON_REAL = main._pedir_tablon
 
+
+def _sin_red(*a, **k):
+    raise RuntimeError("las pruebas no salen a internet")
+
+
+# Por omision NADIE llega a Binance. Las que miran el mercado normal ponen su
+# propio doble y lo quitan; sin esto, una prueba se iba a la red de verdad y
+# contestaba distinto segun donde corriera.
+main.urlopen = _sin_red
+
 fallos = []
 
 
@@ -138,6 +148,110 @@ con_tablon([anuncio(5.12, 1, 999999)])
 ok(porque("BRL", "BUY", 1000) == "",
    "y cuando sale bien no hay motivo que contar")
 
+print("\n== Los reales salen del mercado normal, no del P2P ==")
+# El tablon P2P de reales viene vacio para este servidor en las DOS
+# direcciones. Pero USDT/BRL es un par de verdad en el mercado normal de
+# Binance, y ese precio es publico.
+
+
+class _SpotFalso:
+    def __init__(self, cuerpo):
+        self.cuerpo = cuerpo
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+    def read(self):
+        return self.cuerpo
+
+
+spot_pedido = {}
+
+
+def spot_ok(pedido, timeout=None):
+    spot_pedido["url"] = pedido.full_url
+    spot_pedido["cabeceras"] = dict(pedido.headers)
+    return _SpotFalso(b'{"symbol":"USDTBRL","price":"5.2713"}')
+
+
+_urlopen_guardado = main.urlopen
+main.urlopen = spot_ok
+r, motivo = main._precio_spot("BRL")
+main.urlopen = _urlopen_guardado
+ok(r and r["tasa"] == 5.2713, "el precio de USDT en reales sale del mercado", r)
+ok(r and r["fuente"] == "mercado", "y se dice de donde salio", r)
+ok(motivo == "", "sin motivo que contar", motivo)
+ok("USDTBRL" in spot_pedido.get("url", ""), "se pide el par USDTBRL", spot_pedido.get("url"))
+cab = {k.lower(): v for k, v in spot_pedido.get("cabeceras", {}).items()}
+ok("origin" not in cab, "al mercado normal no se le manda el Origin del P2P", sorted(cab))
+ok("Mozilla" in cab.get("user-agent", ""), "pero si el mismo navegador", cab.get("user-agent"))
+
+# Bolivares no tiene par: ahi el P2P es el unico sitio y se dice asi.
+r, motivo = main._precio_spot("VES")
+ok(r is None and "no lista VES" in motivo,
+   "para bolivares no hay par de mercado, y se dice", motivo)
+
+# Nada de esto puede reventar.
+def spot_basura(pedido, timeout=None):
+    return _SpotFalso(b'{"symbol":"USDTBRL"}')
+
+
+main.urlopen = spot_basura
+r, motivo = main._precio_spot("BRL")
+main.urlopen = _urlopen_guardado
+ok(r is None and "no dio precio" in motivo, "sin precio dentro, no se inventa", motivo)
+
+print("\n== Y el P2P de reales solo se prueba si el mercado falla ==")
+main._mercado_cache.clear()
+pedidos_p2p = []
+
+
+def anota_p2p(fiat, tipo, filas_n=20, sencillo=False):
+    pedidos_p2p.append(fiat)
+    return [anuncio(957, 1, 999999)], ""
+
+
+main._pedir_tablon = anota_p2p
+main.urlopen = spot_ok
+r = main.mercado_p2p()
+main.urlopen = _urlopen_guardado
+ok(r["compraBRL"]["tasa"] == 5.2713 and r["compraBRL"]["fuente"] == "mercado",
+   "los reales vienen del mercado", r["compraBRL"])
+ok("BRL" not in pedidos_p2p,
+   "y al P2P de reales ni se le pregunta: esa puerta esta cerrada", pedidos_p2p)
+ok("VES" in pedidos_p2p, "los bolivares si siguen saliendo del P2P", pedidos_p2p)
+ok(r["disponible"] is True and r["ventaVES"]["tasa"] == 957,
+   "con los dos lados, disponible", r)
+
+# Si el mercado falla, se cae al P2P y se cuentan los DOS motivos.
+main._mercado_cache.clear()
+pedidos_p2p2 = []
+
+
+def solo_ves(fiat, tipo, filas_n=20, sencillo=False):
+    pedidos_p2p2.append(fiat)
+    if fiat == "BRL":
+        return [], "Binance devolvio 0 anuncios de BRL"
+    return [anuncio(957, 1, 999999)], ""
+
+
+def spot_cae(pedido, timeout=None):
+    raise RuntimeError("sin red")
+
+
+main._pedir_tablon = solo_ves
+main.urlopen = spot_cae
+r = main.mercado_p2p()
+main.urlopen = _urlopen_guardado
+ok("BRL" in pedidos_p2p2, "si el mercado falla, SI se prueba el P2P", pedidos_p2p2)
+m = r.get("motivoBRL", "")
+ok("no se entiende" in m or "no se llego" in m,
+   "y se cuenta lo que dijo el mercado", m)
+ok("y el P2P:" in m, "y tambien lo que dijo el P2P", m)
+
 print("\n== La respuesta al navegador nunca deja la app sin datos ==")
 main._mercado_cache.clear()
 con_tablon(None, "Binance respondio 403")
@@ -145,10 +259,12 @@ r = main.mercado_p2p()
 ok(r["ok"] is True and r["disponible"] is False,
    "Binance caido -> ok=True y disponible=False, nunca un error", r)
 ok("403" in r.get("motivo", ""), "y dice por que, con el numero", r.get("motivo"))
-ok("403" in r.get("motivoBRL", "") and "403" in r.get("motivoVES", ""),
-   "cada lado trae el suyo: los reales y los bolivares pueden fallar distinto", r)
-ok(r["motivo"] == r["motivoBRL"],
-   "si los dos fallaron por lo mismo, no se dice dos veces", r["motivo"])
+ok(r.get("motivoBRL") and r.get("motivoVES"),
+   "cada lado trae el suyo: los reales y los bolivares salen de sitios distintos", r)
+ok("reales:" in r["motivo"] and "bolivares:" in r["motivo"],
+   "y el resumen nombra los dos, porque ya no fallan por lo mismo", r["motivo"])
+ok("y el P2P:" in r["motivoBRL"],
+   "el de los reales cuenta el mercado Y el P2P, que son dos intentos", r["motivoBRL"])
 
 # Media lectura tambien es un fallo: sin las DOS tasas no hay suelo.
 main._mercado_cache.clear()

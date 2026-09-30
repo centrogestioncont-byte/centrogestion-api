@@ -334,6 +334,8 @@ vistas2 = []
 
 
 def vacio_siempre(fiat, tipo, filas_n=20, sencillo=False):
+    if tipo == "SELL":          # el sondeo del otro lado, que no se cuenta aqui
+        return [], ""
     vistas2.append(sencillo)
     return [], "Binance devolvio 0 anuncios de BRL"
 
@@ -370,6 +372,62 @@ main._pedir_tablon = no_contesta
 main._leer_mercado("BRL", "BUY", 1000)
 ok(vistas4 == [False],
    "y si Binance no contesta no se reintenta: ahi el problema no es el cuerpo", vistas4)
+
+print("\n== Un tablon vacio se sondea por el otro lado ==")
+# El 30/09 los reales vinieron con CERO anuncios y "total 0" mientras los
+# bolivares, desde el MISMO servidor, traian 20. Desde fuera "no hay tablon" y
+# "solo se vacia este sentido" se ven igual; esto los separa.
+pedidos = []
+
+
+def solo_un_lado(fiat, tipo, filas_n=20, sencillo=False):
+    pedidos.append((fiat, tipo, sencillo))
+    return ([anuncio(5.12, 1, 999999)], "") if tipo == "SELL" else ([], "vacio")
+
+
+main._pedir_tablon = solo_un_lado
+m = porque("BRL", "BUY", 1000)
+ok("SI trae 1 anuncios" in m,
+   "si el otro sentido si trae anuncios, se dice: el tablon existe", m)
+ok(("BRL", "SELL", True) in pedidos,
+   "se sondea la MISMA moneda, al reves, y con el cuerpo simple", pedidos)
+ok(len([p for p in pedidos if p[1] == "SELL"]) == 1,
+   "una sola vez: es un diagnostico, no un dato", pedidos)
+
+
+def ningun_lado(fiat, tipo, filas_n=20, sencillo=False):
+    return [], "vacio"
+
+
+main._pedir_tablon = ningun_lado
+m = porque("BRL", "BUY", 1000)
+ok("tambien viene vacio" in m,
+   "y si el otro lado tambien esta vacio, eso es otra cosa y se dice", m)
+
+# El sondeo NUNCA puede tumbar la lectura: es lo ultimo que se hace y lo menos
+# importante de todo lo que hay aqui.
+def sondeo_revienta(fiat, tipo, filas_n=20, sencillo=False):
+    if tipo == "SELL":
+        raise RuntimeError("me cai")
+    return [], "vacio"
+
+
+main._pedir_tablon = sondeo_revienta
+m = porque("BRL", "BUY", 1000)
+ok("no se pudo mirar" in m, "y si el sondeo revienta, se dice y se sigue", m)
+
+# Y no se gasta una llamada de mas cuando hay lectura.
+pedidos2 = []
+
+
+def siempre_lleno(fiat, tipo, filas_n=20, sencillo=False):
+    pedidos2.append(tipo)
+    return [anuncio(5.12, 1, 999999)], ""
+
+
+main._pedir_tablon = siempre_lleno
+main._leer_mercado("BRL", "BUY", 1000)
+ok(pedidos2 == ["BUY"], "con lectura buena no se sondea nada", pedidos2)
 
 print("\n== El servidor no se presenta ante Binance como un robot ==")
 # Aqui no hay internet, asi que se mira lo que SE IBA A MANDAR. Basta: lo que

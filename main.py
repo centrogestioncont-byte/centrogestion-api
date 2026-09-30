@@ -1145,6 +1145,8 @@ MERCADO_MAX_ANUNCIOS = 10   # de los que pasan el filtro, los 10 mejores
 # Leer UNO es lo mismo que leer "el mejor precio del tablon", que es justo lo
 # que no sirve: publicar contra un precio que solo da una persona.
 MERCADO_MIN_ANUNCIOS = 3
+# Las dos direcciones del tablon, para el sondeo de mas abajo.
+MERCADO_OTRO_LADO = {"BUY": "SELL", "SELL": "BUY"}
 
 # Su volumen tipico, medido en sus propios lotes (70 compras y 131 ventas):
 # compra USDT con reales por una mediana de 196 USDT (~R$ 1.000) y vende por
@@ -1363,6 +1365,41 @@ def _monto_alcanzable(anuncios):
     return mejor[1] if mejor else None
 
 
+def _sondear_otro_lado(fiat, tipo):
+    """El mismo tablon en la direccion contraria. Una vez, solo para contarlo.
+
+    El 30/09 los reales volvieron con CERO anuncios y "total 0" —o sea Binance
+    diciendo "todo bien, no hay nada"— mientras el tablon de bolivares, desde
+    el MISMO servidor, traia 20. Asi que no es un bloqueo general: le pasa algo
+    a esa consulta en concreto, y desde fuera las dos posibilidades se ven
+    exactamente igual.
+
+    Esto las separa, y la respuesta decide que hacer despues:
+
+      el otro lado trae anuncios -> el tablon de esa moneda existe y solo se
+                                    vacia ese sentido
+      el otro lado tambien cero  -> Binance no le sirve tablon de esa moneda a
+                                    este servidor, y esa tasa no se va a poder
+                                    leer sola
+
+    Va con el cuerpo simple: si el normal ya vino vacio, repetirlo aqui seria
+    medir otra vez lo mismo. Y nunca levanta —es un diagnostico, no un dato—.
+    """
+    otro = MERCADO_OTRO_LADO.get(tipo)
+    if not otro:
+        return "sin otro lado que mirar"
+    try:
+        crudo, _ = _pedir_tablon(fiat, otro, sencillo=True)
+    except Exception:
+        return "el otro lado no se pudo mirar"
+    if crudo is None:
+        return "el otro lado del tablon no contesto"
+    if not crudo:
+        return "el otro lado del tablon de %s tambien viene vacio" % fiat
+    return ("el otro lado del tablon de %s SI trae %d anuncios"
+            % (fiat, len(crudo)))
+
+
 def _leer_mercado(fiat, tipo, monto):
     """El precio alcanzable A SU VOLUMEN, no el mejor del tablon.
 
@@ -1396,7 +1433,7 @@ def _leer_mercado(fiat, tipo, monto):
             # " · con la pregunta simple tampoco", que no dice ni de que moneda.
             base = (fallo_otra or fallo or
                     ("Binance no tiene anuncios de %s ahora mismo" % fiat))
-            fallo = base + " · con la pregunta simple tampoco"
+            fallo = base + " · con la pregunta simple tampoco · " + _sondear_otro_lado(fiat, tipo)
     if not crudo:
         return None, fallo or ("Binance no tiene anuncios de %s ahora mismo" % fiat)
     anuncios = _anuncios_legibles(crudo)

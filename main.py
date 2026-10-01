@@ -11,6 +11,7 @@
 #   GET/PUT /estado                     TODO el resto del negocio
 #   POST /estado/importar               la carga inicial desde Firebase
 #   GET/POST /auditoria                 quien hizo que y cuando
+#   GET  /mercado                       el P2P de Binance, a su volumen
 #
 # /estado es el reemplazo de Firebase. El navegador manda su bloque, el
 # SERVIDOR fusiona y devuelve el resultado. Antes cada dispositivo fusionaba
@@ -27,7 +28,9 @@ import threading
 import time
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, urlparse
+from urllib.request import Request, urlopen
 
 from bson import ObjectId
 from bson.errors import InvalidId
@@ -1109,6 +1112,523 @@ def restaurar_respaldo(archivo):
 
 
 # ── Servidor ─────────────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════
+# EL MERCADO P2P — a como esta comprando y vendiendo USDT la gente, AHORA
+# ══════════════════════════════════════════════════════════════════════════
+# Sus palabras: "no puedo estar todo el tiempo dependiendo de mi competencia
+# para saber si bajo o subo la tasa".
+#
+# Esto vive AQUI y no en la app por una razon que no tiene vuelta: la app
+# corre en una pagina, y Binance no autoriza que otro dominio le pregunte —el
+# navegador bloquea la respuesta antes de que llegue—. El servidor no tiene esa
+# limitacion. No hace falta volver a intentarlo del otro lado.
+#
+# Lo que se lee es el tablon P2P, el mismo que carga su pagina. No es un
+# contrato: puede cambiar sin avisar. Por eso TODO lo de aqui falla suave —si
+# algo no viene como se espera, se contesta "sin lectura" y la app sigue
+# entera—. La misma regla que la huella: una pieza que no responde no puede
+# costarle el dia.
+#
+# Para VENEZUELA no hay alternativa: Binance no tiene par al contado USDT/VES.
+# El unico sitio donde existe ese precio es este tablon.
+BINANCE_P2P = "https://p2p.binance.com/bapi/c2c/v2/friendly/c2c/adv/search"
+# El mercado NORMAL de Binance, que no es el P2P. Aqui USDT/BRL es un par como
+# cualquier otro y su precio es publico, sin filtro de pais.
+#
+# Existe porque el tablon P2P de reales viene VACIO para este servidor en las
+# DOS direcciones —comprobado el 30/09 con el sondeo, y con la pregunta simple
+# tambien—, mientras el de bolivares, desde la misma maquina, trae anuncios.
+# Esa puerta esta cerrada y no se va a abrir. Esta es otra.
+#
+# Para bolivares no hay par de mercado: Binance no lista VES. Ahi el P2P es el
+# unico sitio donde existe ese precio, y ese si funciona.
+BINANCE_SPOT = "https://api.binance.com/api/v3/ticker/price"
+SPOT_POR_MONEDA = {"BRL": "USDTBRL"}
+
+# Y si Binance no contesta, OTROS SITIOS. Su servidor esta en Railway EE.UU. y
+# Binance le devuelve 451 —"bloqueado por tu pais"— en el mercado normal, igual
+# que le vacia el tablon P2P de reales. Cambiar de region es un ajuste de pago
+# que su plan no tiene, asi que el precio hay que buscarlo donde si conteste.
+#
+# USDT/BRL es de los mercados mas liquidos que hay: entre un sitio y otro la
+# diferencia es de decimas de por ciento. Para un SUELO —hasta donde puede
+# ofrecer sin perder— eso vale de sobra. Lo que no vale es callar de donde
+# salio, y por eso cada lectura trae su "fuente" y la pantalla la enseña.
+#
+# El orden importa: Binance primero, porque es donde ella opera de verdad.
+FUENTES_BRL = [
+    ("Binance", BINANCE_SPOT + "?symbol=USDTBRL"),
+    ("CoinGecko", "https://api.coingecko.com/api/v3/simple/price"
+                  "?ids=tether&vs_currencies=brl"),
+    ("Mercado Bitcoin", "https://api.mercadobitcoin.net/api/v4/tickers"
+                        "?symbols=USDT-BRL"),
+]
+# Mas corto que el del P2P: son tres seguidas, y si las tres se cuelgan la
+# pantalla se queda esperando. Con 4s el peor caso son 12, no 18.
+MERCADO_ESPERA_FUENTE = 4
+MERCADO_ESPERA = 6          # segundos; si tarda mas, se responde sin lectura
+MERCADO_CACHE_SEG = 300     # 5 min: ella abre la pantalla muchas veces al dia
+# Un FALLO no se guarda cinco minutos. El boton de la tarjeta dice "reintentar"
+# y con el cache largo no reintentaba nada: devolvia el mismo fallo guardado
+# durante cinco minutos, asi que pulsarlo parecia no hacer nada. Veinte
+# segundos es bastante para que cien repintados no se conviertan en cien
+# preguntas a Binance, y poco para que pulsar el boton signifique algo.
+MERCADO_CACHE_FALLO_SEG = 20
+MERCADO_MAX_ANUNCIOS = 10   # de los que pasan el filtro, los 10 mejores
+# Cuantos anuncios tienen que aceptar un monto para que valga como "el mercado".
+# Leer UNO es lo mismo que leer "el mejor precio del tablon", que es justo lo
+# que no sirve: publicar contra un precio que solo da una persona.
+MERCADO_MIN_ANUNCIOS = 3
+# Las dos direcciones del tablon, para el sondeo de mas abajo.
+MERCADO_OTRO_LADO = {"BUY": "SELL", "SELL": "BUY"}
+
+# Su volumen tipico, medido en sus propios lotes (70 compras y 131 ventas):
+# compra USDT con reales por una mediana de 196 USDT (~R$ 1.000) y vende por
+# bolivares por 118 USDT (~112.000 Bs). Importa: en el tablon los buenos
+# precios estan en los anuncios GRANDES, asi que leer "el mejor precio" le
+# daria uno que no puede tomar, y publicaria una tasa que no puede sostener.
+MERCADO_MONTO_POR_DEFECTO = {"BRL": 1000.0, "VES": 112000.0}
+
+# Como se presenta ante Binance. Esto NO es cosmetico: el tablon es la misma
+# direccion que carga su pagina y delante tiene un filtro que corta a lo que no
+# parece un navegador. El servidor se presentaba como "centrogestion-api" -que
+# es justo lo que ese filtro busca- y desde el navegador la tarjeta solo decia
+# "sin lectura", sin numero ni nada.
+#
+# No hay forma de probar esto sin salir a internet, ni aqui ni en el CI: la
+# unica prueba de verdad es su servidor desplegado. Por eso el commit anterior
+# va primero: si esto no era, la tarjeta ahora dice que fue.
+#
+# Origin y Referer van porque un navegador de verdad los manda al llamar a esta
+# direccion, y un filtro que mira el User-Agent suele mirarlos tambien.
+MERCADO_CABECERAS = {
+    "Content-Type": "application/json",
+    "Accept": "application/json",
+    "Accept-Language": "es,en;q=0.9",
+    "Origin": "https://p2p.binance.com",
+    "Referer": "https://p2p.binance.com/es/trade/all-payments/USDT",
+    "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                   "AppleWebKit/537.36 (KHTML, like Gecko) "
+                   "Chrome/126.0.0.0 Safari/537.36"),
+}
+
+_mercado_cache = {}
+_mercado_candado = threading.Lock()
+
+
+def _num_o_none(v):
+    """Un numero de verdad, o nada. El tablon devuelve los precios como texto."""
+    try:
+        n = float(v)
+    except (TypeError, ValueError):
+        return None
+    if n != n or n in (float("inf"), float("-inf")) or n <= 0:
+        return None
+    return n
+
+
+def _mediana(valores):
+    if not valores:
+        return None
+    v = sorted(valores)
+    m = len(v) // 2
+    return v[m] if len(v) % 2 else (v[m - 1] + v[m]) / 2.0
+
+
+def _motivo_corto(v, tope=70):
+    """Lo que venga, en una linea corta.
+
+    Esto acaba en una tarjeta de SU pantalla, no en un log: un volcado de tres
+    parrafos ahi no se lee y encima puede traer cosas de Binance que no
+    controlamos. Se aplasta a una linea y se corta.
+    """
+    t = " ".join(str(v if v is not None else "").split())
+    return t[:tope] if t else "sin detalle"
+
+
+def _monto_legible(monto):
+    """1000 -> "1.000". Va dentro de una frase que ella lee."""
+    try:
+        return "{:,.0f}".format(float(monto)).replace(",", ".")
+    except (TypeError, ValueError):
+        return str(monto)
+
+
+MERCADO_CABECERAS_SPOT = {
+    "Accept": "application/json",
+    "Accept-Language": "es,en;q=0.9",
+    "User-Agent": MERCADO_CABECERAS["User-Agent"],
+}
+
+
+def _precio_de(datos):
+    """El precio dentro de la respuesta, venga en la forma que venga.
+
+    Cada sitio lo envuelve distinto y no hay contrato: se prueban las tres
+    formas conocidas y si ninguna encaja se devuelve nada, en vez de adivinar.
+
+      Binance          {"price": "5.27"}
+      CoinGecko        {"tether": {"brl": 5.27}}
+      Mercado Bitcoin  [{"pair": "USDT-BRL", "last": "5.27"}]
+    """
+    if isinstance(datos, list):
+        datos = datos[0] if datos and isinstance(datos[0], dict) else None
+    if not isinstance(datos, dict):
+        return None
+    directo = _num_o_none(datos.get("price")) or _num_o_none(datos.get("last"))
+    if directo:
+        return directo
+    dentro = datos.get("tether")
+    if isinstance(dentro, dict):
+        return _num_o_none(dentro.get("brl"))
+    return None
+
+
+def _pedir_precio(url):
+    """Una fuente. Devuelve (precio, motivo del fallo)."""
+    pedido = Request(url, headers=dict(MERCADO_CABECERAS_SPOT))
+    try:
+        with urlopen(pedido, timeout=MERCADO_ESPERA_FUENTE) as r:
+            datos = json.loads(r.read().decode("utf-8"))
+    except HTTPError as err:
+        # 451 es "bloqueado por tu pais" y es EL caso: conviene que se lea tal
+        # cual en la pantalla, porque no se arregla con codigo.
+        return None, "respondio %s" % err.code
+    except TimeoutError:
+        return None, "tardo mas de %ss" % MERCADO_ESPERA_FUENTE
+    except URLError as err:
+        return None, "no se llego (%s)" % _motivo_corto(err.reason, 40)
+    except Exception:
+        return None, "contesto algo que no se entiende"
+    precio = _precio_de(datos)
+    if precio is None:
+        return None, "no dio precio"
+    return precio, ""
+
+
+def _precio_spot(fiat):
+    """El precio de 1 USDT en esa moneda, del primer sitio que conteste.
+
+    Devuelve ({tasa, fuente}, "") o (None, motivo con lo que dijo CADA uno).
+    No lleva anuncios ni monto: aqui no hay anuncio que aceptar, el precio es
+    uno solo.
+    """
+    if fiat != "BRL":
+        return None, "no hay mercado de %s fuera del P2P" % fiat
+    fallos = []
+    for nombre, url in FUENTES_BRL:
+        precio, fallo = _pedir_precio(url)
+        if precio:
+            return {"tasa": round(precio, 4), "fuente": nombre}, ""
+        fallos.append("%s %s" % (nombre, fallo))
+    # Se cuentan TODAS, no solo la primera: cual conteste y cual no es
+    # justamente lo que hay que saber para decidir que hacer despues.
+    return None, " · ".join(fallos)
+
+
+def _porque_vacio(datos, fiat):
+    """El tablon contesto SIN un solo anuncio. Eso hay que contarlo tal cual.
+
+    Un tablon vacio en un mercado grande —Brasil tiene cientos de anuncios a
+    cualquier hora— no es creible: lo normal es que nos esten filtrando en
+    silencio, contestando 200 con la lista vacia en vez de un 403 que se vea.
+    Asi que se repite lo que dijo EL (success, code, message, total) en vez de
+    suponerlo nosotros. Paso el 29/09 con los reales y no habia por donde
+    agarrarlo: la pantalla decia "no tiene anuncios" y eso no se lo cree nadie.
+    """
+    trozos = []
+    if datos.get("success") is False:
+        trozos.append("dice que no tuvo exito")
+    codigo = datos.get("code")
+    if codigo not in (None, "", "000000"):
+        trozos.append("codigo " + _motivo_corto(codigo, 20))
+    mensaje = datos.get("message")
+    if mensaje:
+        trozos.append(_motivo_corto(mensaje, 40))
+    total = datos.get("total")
+    if isinstance(total, (int, float)) and not isinstance(total, bool):
+        trozos.append("total %d" % int(total))
+    base = "Binance devolvio 0 anuncios de %s" % fiat
+    return base + (" (" + " · ".join(trozos) + ")" if trozos else "")
+
+
+def _pedir_tablon(fiat, tipo, filas=20, sencillo=False):
+    """Una pagina del tablon. Devuelve (lista, motivo del fallo).
+
+    tipo es desde el punto de vista de quien pregunta: "BUY" = quiero comprar
+    USDT, y contesta con los anuncios de quien vende.
+
+    Devuelve DOS cosas a proposito. Antes devolvia la lista o None a secas, y
+    ese None se confundia mas abajo con "el tablon contesto pero ningun anuncio
+    acepta su monto": la pantalla acababa diciendo "sin lectura" para las dos.
+    Son problemas distintos y se arreglan en sitios distintos -uno aqui, el
+    otro bajando el monto en Configuracion-, asi que hay que poder decir cual.
+    """
+    pregunta = {"fiat": fiat, "asset": "USDT", "tradeType": tipo,
+                "page": 1, "rows": filas}
+    if not sencillo:
+        # Lo que manda su propia pagina. Cuesta nada y es una cosa menos por la
+        # que el filtro pueda decir que esto no es un navegador.
+        #
+        # Con "sencillo" se quitan los tres: es la pregunta minima que el tablon
+        # entiende. Sirve para saber si lo que vacia una moneda es alguno de
+        # estos campos y no que de verdad no haya anuncios.
+        pregunta.update({"payTypes": [], "publisherType": None, "clientType": "web"})
+    cuerpo = json.dumps(pregunta).encode("utf-8")
+    pedido = Request(BINANCE_P2P, data=cuerpo, method="POST",
+                     headers=dict(MERCADO_CABECERAS))
+    try:
+        with urlopen(pedido, timeout=MERCADO_ESPERA) as r:
+            datos = json.loads(r.read().decode("utf-8"))
+    except HTTPError as err:
+        # El caso mas esperable: Binance corta a quien no le gusta. El numero
+        # importa -403 es "no me fio de ti" y 429 es "vas muy rapido"- y se
+        # arreglan distinto, asi que se dice cual fue.
+        return None, "Binance respondio %s" % err.code
+    except TimeoutError:
+        return None, "Binance tardo mas de %ss en contestar" % MERCADO_ESPERA
+    except URLError as err:
+        # HTTPError hereda de URLError, por eso va despues. Aqui caen las que
+        # no llegaron a tener respuesta: DNS, conexion rechazada, salida
+        # bloqueada.
+        return None, "no se llego a Binance (%s)" % _motivo_corto(err.reason)
+    except Exception:
+        return None, "Binance contesto algo que no se entiende"
+    if not isinstance(datos, dict):
+        return None, "Binance contesto algo que no se entiende"
+    lista = datos.get("data")
+    if not isinstance(lista, list):
+        # Cuando corta por filtro suele contestar 200 con su propio mensaje
+        # dentro en vez de un error HTTP. Decirlo vale mas que "no se entiende".
+        suyo = datos.get("message") or datos.get("code")
+        if suyo:
+            return None, "Binance dijo: %s" % _motivo_corto(suyo)
+        return None, "Binance contesto sin lista de anuncios"
+    # La lista vacia trae motivo aunque no sea un fallo de red: lo que hay que
+    # contar solo se ve desde aqui, con el cuerpo de la respuesta delante.
+    if not lista:
+        return lista, _porque_vacio(datos, fiat)
+    return lista, ""
+
+
+def _anuncios_legibles(crudo):
+    """(precio, minimo, maximo) de cada anuncio que se puede leer entero.
+
+    Sin limites declarados no se puede saber si acepta un monto: se descarta en
+    vez de suponer que si.
+    """
+    fuera = []
+    for fila in crudo:
+        if not isinstance(fila, dict):
+            continue
+        adv = fila.get("adv")
+        if not isinstance(adv, dict):
+            continue
+        precio = _num_o_none(adv.get("price"))
+        minimo = _num_o_none(adv.get("minSingleTransAmount"))
+        maximo = _num_o_none(adv.get("maxSingleTransAmount"))
+        if precio is None or minimo is None or maximo is None:
+            continue
+        if maximo < minimo:
+            continue
+        fuera.append((precio, minimo, maximo))
+    return fuera
+
+
+def _precios_a(anuncios, monto):
+    """Los precios de los anuncios que aceptan ese monto, en el orden del tablon."""
+    return [precio for (precio, minimo, maximo) in anuncios
+            if minimo <= monto <= maximo]
+
+
+def _monto_alcanzable(anuncios, pedido):
+    """El monto mas CERCANO al suyo que todavia acepten varios anuncios.
+
+    Cercano, no el mas grande. La primera version buscaba solo entre los
+    MAXIMOS y hacia abajo desde el techo del tablon, dando por hecho que si su
+    monto no entraba era por pasarse. El 30/09 paso lo contrario: los anuncios
+    de VES pedian MINIMOS por encima de sus 112.000 Bs —su operacion era
+    demasiado PEQUEÑA— y la busqueda acabo en 36.450.000 Bs, unos 38.000 USDT.
+    Le midio el precio de un mercado en el que no opera, y de ahi salia un
+    suelo optimista, que es peor que ninguno.
+
+    Reproducido con un tablon como el suyo: a 112.000 lo aceptaban 0 anuncios,
+    esto elegia 50.000.000 (4 anuncios) y 200.000 lo aceptaban 8.
+
+    Ahora se miran los minimos Y los maximos —son los unicos montos donde
+    cambia quien acepta— y gana el que menos se aleje del suyo, hacia arriba o
+    hacia abajo. Sigue sin valer leer UN anuncio: eso es leer "el mejor precio
+    del tablon". Si ninguno llega a MERCADO_MIN_ANUNCIOS, manda el que tenga
+    mas, y entre iguales el mas cercano.
+    """
+    candidatos = set()
+    for (_, minimo, maximo) in anuncios:
+        candidatos.add(minimo)
+        candidatos.add(maximo)
+    mejor = None                      # (cuantos, -distancia, monto)
+    for monto in sorted(candidatos):
+        cuantos = len(_precios_a(anuncios, monto))
+        if not cuantos:
+            continue
+        # Con la cuenta hecha, lo unico que importa es la cercania; por debajo
+        # de la cuenta, primero mas anuncios y despues la cercania.
+        marca = (min(cuantos, MERCADO_MIN_ANUNCIOS), -abs(monto - pedido))
+        if mejor is None or marca > mejor[0]:
+            mejor = (marca, monto)
+    return mejor[1] if mejor else None
+
+
+def _sondear_otro_lado(fiat, tipo):
+    """El mismo tablon en la direccion contraria. Una vez, solo para contarlo.
+
+    El 30/09 los reales volvieron con CERO anuncios y "total 0" —o sea Binance
+    diciendo "todo bien, no hay nada"— mientras el tablon de bolivares, desde
+    el MISMO servidor, traia 20. Asi que no es un bloqueo general: le pasa algo
+    a esa consulta en concreto, y desde fuera las dos posibilidades se ven
+    exactamente igual.
+
+    Esto las separa, y la respuesta decide que hacer despues:
+
+      el otro lado trae anuncios -> el tablon de esa moneda existe y solo se
+                                    vacia ese sentido
+      el otro lado tambien cero  -> Binance no le sirve tablon de esa moneda a
+                                    este servidor, y esa tasa no se va a poder
+                                    leer sola
+
+    Va con el cuerpo simple: si el normal ya vino vacio, repetirlo aqui seria
+    medir otra vez lo mismo. Y nunca levanta —es un diagnostico, no un dato—.
+    """
+    otro = MERCADO_OTRO_LADO.get(tipo)
+    if not otro:
+        return "sin otro lado que mirar"
+    try:
+        crudo, _ = _pedir_tablon(fiat, otro, sencillo=True)
+    except Exception:
+        return "el otro lado no se pudo mirar"
+    if crudo is None:
+        return "el otro lado del tablon no contesto"
+    if not crudo:
+        return "el otro lado del tablon de %s tambien viene vacio" % fiat
+    return ("el otro lado del tablon de %s SI trae %d anuncios"
+            % (fiat, len(crudo)))
+
+
+def _leer_mercado(fiat, tipo, monto):
+    """El precio alcanzable A SU VOLUMEN, no el mejor del tablon.
+
+    Devuelve ({tasa, anuncios, monto, montoPedido?}, "") o (None, motivo). Se
+    queda con los anuncios cuyo rango acepte su monto, y de esos toma la
+    MEDIANA: el primero de la lista suele ser diminuto o con condiciones, y
+    publicar contra ese numero es publicar contra un precio que no existe
+    para ella.
+
+    Si NINGUNO acepta su monto, baja al mayor monto que si esten dando y lo
+    dice en "montoPedido". Antes eso era todo o nada y se quedaba sin lectura.
+    """
+    crudo, fallo = _pedir_tablon(fiat, tipo)
+    if crudo is None:
+        return None, fallo
+    # Un tablon vacio en un mercado grande no es creible, asi que se pregunta
+    # UNA vez mas con el cuerpo mas simple posible. Separa "Binance no tiene
+    # anuncios" de "no le gusta como se lo pedimos" —y si era lo segundo, lo
+    # arregla en el acto, sin esperar a otro despliegue—.
+    #
+    # Solo cuando ya vino vacio: una lectura buena no cuesta ni una llamada mas
+    # de las que costaba. Y solo una vez: dos no aportan nada y Binance corta
+    # a quien pregunta mucho.
+    if not crudo:
+        crudo_otra, fallo_otra = _pedir_tablon(fiat, tipo, sencillo=True)
+        if crudo_otra:
+            crudo, fallo = crudo_otra, ""
+        else:
+            # El motivo se construye entero aqui, no pegando un sufijo a lo que
+            # hubiera: si el primero venia vacio quedaba una frase empezada por
+            # " · con la pregunta simple tampoco", que no dice ni de que moneda.
+            base = (fallo_otra or fallo or
+                    ("Binance no tiene anuncios de %s ahora mismo" % fiat))
+            fallo = base + " · con la pregunta simple tampoco · " + _sondear_otro_lado(fiat, tipo)
+    if not crudo:
+        return None, fallo or ("Binance no tiene anuncios de %s ahora mismo" % fiat)
+    anuncios = _anuncios_legibles(crudo)
+    if not anuncios:
+        return None, ("de los %d anuncios de %s, ninguno dice sus límites"
+                      % (len(crudo), fiat))
+    precios = _precios_a(anuncios, monto)
+    usado = monto
+    if not precios:
+        usado = _monto_alcanzable(anuncios, monto)
+        precios = _precios_a(anuncios, usado) if usado else []
+    if not precios:
+        return None, ("de los %d anuncios de %s, ninguno acepta %s"
+                      % (len(crudo), fiat, _monto_legible(monto)))
+    precios = precios[:MERCADO_MAX_ANUNCIOS]
+    dato = {"tasa": round(_mediana(precios), 4),
+            "anuncios": len(precios), "monto": usado}
+    # Solo cuando NO es el suyo: asi la app puede decirlo sin tener que
+    # comparar por su cuenta, y una lectura normal no arrastra un campo de mas.
+    if usado != monto:
+        dato["montoPedido"] = monto
+    return dato, ""
+
+
+def mercado_p2p(montos=None):
+    """Las dos lecturas que necesita, con cache.
+
+    NUNCA levanta: si Binance no contesta, o contesta algo raro, devuelve
+    disponible=False y la app dibuja lo que paso. Que se caiga el tablon no
+    puede dejarla sin poder trabajar.
+    """
+    montos = montos or {}
+    brl = _num_o_none(montos.get("BRL")) or MERCADO_MONTO_POR_DEFECTO["BRL"]
+    ves = _num_o_none(montos.get("VES")) or MERCADO_MONTO_POR_DEFECTO["VES"]
+    clave = (brl, ves)
+    ahora_seg = time.time()
+    with _mercado_candado:
+        guardado = _mercado_cache.get(clave)
+        if guardado:
+            vida = (MERCADO_CACHE_SEG if guardado[1].get("disponible")
+                    else MERCADO_CACHE_FALLO_SEG)
+            if (ahora_seg - guardado[0]) < vida:
+                return guardado[1]
+    # Los REALES salen del mercado normal (USDT/BRL es un par de verdad). El
+    # P2P de reales esta cerrado para este servidor y no va a volver, asi que
+    # ni se le pregunta mientras el mercado conteste.
+    compra, fallo_brl = _precio_spot("BRL")
+    if compra is None:
+        # Solo si el mercado falla se prueba el P2P: por si algun dia se abre,
+        # y porque su motivo dice mas que quedarse a medias.
+        compra_p2p, fallo_p2p = _leer_mercado("BRL", "BUY", brl)
+        if compra_p2p:
+            compra, fallo_brl = compra_p2p, ""
+        else:
+            fallo_brl = "%s · y el P2P: %s" % (fallo_brl, fallo_p2p)
+    # Ella VENDE USDT por bolivares -> mira a quien los compra (SELL). Aqui el
+    # P2P es el unico sitio: Binance no lista VES.
+    venta, fallo_ves = _leer_mercado("VES", "SELL", ves)
+    fuera = {
+        "ok": True,
+        "leido": ahora().isoformat(),
+        "compraBRL": compra,
+        "ventaVES": venta,
+        "disponible": bool(compra or venta),
+    }
+    # El porque va SIEMPRE que falte un lado, aunque el otro si tenga lectura.
+    # Con una sola de las dos tasas no hay suelo, asi que media lectura es un
+    # fallo que ella tiene que poder perseguir igual.
+    if not compra:
+        fuera["motivoBRL"] = fallo_brl
+    if not venta:
+        fuera["motivoVES"] = fallo_ves
+    if not fuera["disponible"]:
+        # Un resumen para quien solo mire este campo. Cuando las dos fallan por
+        # lo mismo -lo normal si el que corta es Binance- no se dice dos veces.
+        fuera["motivo"] = (fallo_brl if fallo_brl == fallo_ves
+                           else "reales: %s · bolivares: %s" % (fallo_brl, fallo_ves))
+    with _mercado_candado:
+        _mercado_cache[clave] = (ahora_seg, fuera)
+    return fuera
+
+
 class Manejador(BaseHTTPRequestHandler):
     server_version = "centrogestion-api"
 
@@ -1166,6 +1686,20 @@ class Manejador(BaseHTTPRequestHandler):
             return None, (403, {"ok": False, "error": "tu usuario no puede modificar datos"})
         return usuario, None
 
+    def _sesion_sin_base(self):
+        """Como _sesion, pero si Mongo esta caido lo dice en vez de reventar.
+
+        El mercado no guarda nada ni lee del negocio: no tiene por que caerse
+        con la base. Se separa para no meter un try dentro de cada ruta.
+        """
+        try:
+            usuario = usuario_de_sesion(self._testigo())
+        except PyMongoError:
+            return None, (503, {"ok": False, "error": "base no disponible"})
+        if not usuario:
+            return None, (401, {"ok": False, "error": "sesion vencida"})
+        return usuario, None
+
     def _sesion(self):
         """Solo pide sesion valida: alcanza para leer."""
         usuario = usuario_de_sesion(self._testigo())
@@ -1221,6 +1755,19 @@ class Manejador(BaseHTTPRequestHandler):
                 return self._responder(200, {"ok": True, "clientes": listar_clientes()})
             except PyMongoError:
                 return self._responder(503, {"ok": False, "error": "base no disponible"})
+
+        if ruta == "/mercado":
+            # Pide sesion como todo lo demas, pero NO toca Mongo: si la base
+            # esta caida esto sigue contestando, y al reves tambien.
+            usuario, error = self._sesion_sin_base()
+            if error:
+                return self._responder(*error)
+            pedido = parse_qs(urlparse(self.path).query)
+            montos = {
+                "BRL": (pedido.get("brl") or [None])[0],
+                "VES": (pedido.get("ves") or [None])[0],
+            }
+            return self._responder(200, mercado_p2p(montos))
 
         if ruta == "/estado":
             # Cualquier sesion valida puede leer: el Supervisor tambien tiene

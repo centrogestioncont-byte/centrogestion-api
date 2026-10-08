@@ -147,43 +147,63 @@ for clave in ("prestamos", "egresos", "egresos_personales", "cierresMes",
               "config", "ajustesSaldo", "traspasos", "eeuu"):
     ok(clave in main.CLAVES_GUARDADAS, "'%s' SI se guarda" % clave)
 
-print("\n== 5. El filtro ==")
+print("\n== 5. Se deshace lo que no le tocaba, y solo se avisa de lo que CAMBIA ==")
 
-BLOQUE = {
-    "brl": [{"id": 1}], "vzla": [], "cuentas": [{"id": "c1", "saldo": 10}],
+GUARDADO = {
+    "brl": [], "cuentas": [{"id": "c1", "saldo": 1000}],
+    "prestamos": [{"id": 9, "monto": 100}],
+    "egresos": [{"id": 8, "motivo": "LUZ"}],
+    "config": {"pct_sueldo": 30},
+    "cierresMes": [], "traspasos": [], "ajustesSaldo": [],
     "inventarioUsdt": [], "cuentasCobrar": [], "movimientosCapital": [],
     "clientes": [], "_deletedMerge": {}, "_modCampos": {},
-    "prestamos": [{"id": 9}], "egresos": [{"id": 8}], "config": {"pct_sueldo": 99},
-    "cierresMes": [], "traspasos": [], "ajustesSaldo": [],
 }
 
-limpio, rech = main.filtrar_por_permisos(BLOQUE, ADMIN)
-ok(rech == [], "al administrador no se le quita nada", rech)
-ok(limpio is BLOQUE, "y el bloque ni se copia")
+def copia(d):
+    import copy as _c
+    return _c.deepcopy(d)
 
-limpio, rech = main.filtrar_por_permisos(BLOQUE, OPE)
-ok("prestamos" in rech and "egresos" in rech and "config" in rech,
-   "al operador se le quitan prestamos, egresos y config", rech)
-ok("prestamos" not in limpio and "egresos" not in limpio and "config" not in limpio,
-   "y de verdad no quedan en el bloque", sorted(limpio))
-for clave in ("brl", "vzla", "cuentas", "inventarioUsdt", "cuentasCobrar",
-              "movimientosCapital", "clientes", "_deletedMerge", "_modCampos"):
-    ok(clave in limpio, "'%s' pasa: es lo que necesita una remesa" % clave)
-ok(rech == sorted(rech), "la lista de rechazadas viene ordenada", rech)
-ok("prestamos" in BLOQUE, "el bloque original no se toca")
+# EL CASO DE VERDAD, el que se vio con su primer operador: la app manda el
+# bloque ENTERO en cada guardado, con las 36 claves, haya cambiado algo o no.
+# Antes esto sacaba un aviso de 14 lineas sin que nadie hubiera tocado nada.
+igual, rech = main.aplicar_permisos(copia(GUARDADO), GUARDADO, OPE)
+ok(rech == [],
+   "mandar el bloque entero SIN cambiar nada no avisa de nada", rech)
+ok(igual["prestamos"] == GUARDADO["prestamos"], "y lo guardado sigue igual")
 
-# Y el permiso suelto funciona: le activa egresos y escribe egresos, sin que
-# eso le abra los prestamos. Es lo que ella pidio con esas palabras.
+# Y cuando si intenta cambiar algo, se deshace y se avisa.
+TOCADO = copia(GUARDADO)
+TOCADO["prestamos"] = [{"id": 9, "monto": 0, "cliente": "BORRADO"}]
+TOCADO["egresos"] = [{"id": 8, "motivo": "ROBADO"}]
+TOCADO["brl"] = [{"_uid": "r1", "cliente": "JUAN"}]
+TOCADO["cuentas"] = [{"id": "c1", "saldo": 900}]
+limpio, rech = main.aplicar_permisos(copia(TOCADO), GUARDADO, OPE)
+ok(rech == ["egresos", "prestamos"],
+   "solo se avisa de las dos que de verdad intento cambiar", rech)
+ok(limpio["prestamos"] == GUARDADO["prestamos"], "el prestamo vuelve a lo que habia")
+ok(limpio["egresos"] == GUARDADO["egresos"], "el egreso tambien")
+ok(limpio["brl"][0]["cliente"] == "JUAN", "pero SU remesa se queda")
+ok(limpio["cuentas"][0]["saldo"] == 900, "y el saldo que movio la remesa tambien")
+
+# A la administradora no se le deshace nada.
+limpio, rech = main.aplicar_permisos(copia(TOCADO), GUARDADO, ADMIN)
+ok(rech == [], "a la administradora no se le toca nada", rech)
+ok(limpio["prestamos"][0]["cliente"] == "BORRADO", "y su cambio se queda")
+
+# El permiso suelto: le activa egresos y los egresos le entran, sin que eso
+# le abra los prestamos. Es lo que ella pidio con esas palabras.
 CON_EGRESOS = {"rol": "brl", "permisos": {"editar": True, "egresos": True}}
-limpio, rech = main.filtrar_por_permisos(BLOQUE, CON_EGRESOS)
-ok("egresos" not in rech and "egresos" in limpio,
-   "con el permiso de egresos, los egresos se guardan", rech)
-ok("egresos_personales" not in rech,
-   "y los gastos personales tambien: van con el mismo permiso")
-ok("prestamos" in rech, "pero los prestamos siguen cerrados", rech)
+limpio, rech = main.aplicar_permisos(copia(TOCADO), GUARDADO, CON_EGRESOS)
+ok(rech == ["prestamos"], "con el permiso de egresos, solo cae el prestamo", rech)
+ok(limpio["egresos"][0]["motivo"] == "ROBADO", "y el egreso entra")
 
-limpio, rech = main.filtrar_por_permisos("no soy un dict", OPE)
-ok(rech == [] and limpio == "no soy un dict", "un cuerpo raro no revienta el filtro")
+# Una clave que todavia no existe guardada se quita entera.
+limpio, rech = main.aplicar_permisos({"prestamos": [{"id": 1}]}, {}, OPE)
+ok("prestamos" not in limpio, "una clave sin nada guardado se quita entera")
+ok(rech == ["prestamos"], "y se avisa", rech)
+
+limpio, rech = main.aplicar_permisos("no soy un dict", GUARDADO, OPE)
+ok(rech == [] and limpio == "no soy un dict", "un cuerpo raro no revienta")
 
 print("\n== 6. Quitar una clave CONSERVA lo guardado (en esto se apoya todo) ==")
 
@@ -204,15 +224,16 @@ if not _src:
         if inspect.isclass(_o) and hasattr(_o, "do_PUT"):
             _src = inspect.getsource(_o.do_PUT)
             break
-ok("filtrar_por_permisos" in _src,
-   "PUT /estado pasa el bloque por el filtro")
+ok("aplicar_permisos" in _src,
+   "PUT /estado pasa el estado por los permisos")
 # Anclado en la LLAMADA, no en el nombre: un comentario que diga
 # "antes de fusionar_estado" aparece antes y hacia pasar esta guardia
 # midiendo otro trozo del archivo. Ya paso tres veces en este proyecto.
-_i = _src.find("filtrar_por_permisos(entrante")
+_i = _src.find("aplicar_permisos(fusionado")
 _j = _src.find("fusionar_estado(entrante")
-ok(_i > -1 and _j > _i,
-   "y lo filtra ANTES de fusionar, no despues", (_i, _j))
+ok(_i > -1 and _j > -1 and _i > _j,
+   "y lo aplica DESPUES de fusionar, que es lo que permite ver si cambia algo",
+   (_i, _j))
 ok("clavesRechazadas" in _src,
    "la respuesta dice que no se guardo (un fallo mudo obliga a adivinar)")
 ok("escritura rechazada" in _src,

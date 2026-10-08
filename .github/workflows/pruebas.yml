@@ -35,3 +35,10 @@ jobs:
       # salio cada numero: si algo no cuadra al desplegar, se ve al momento.
       - name: Lector del mercado P2P
         run: python3 pruebas/mercado.py
+
+      # El respaldo automatico: se le pone una Mongo de mentira delante y se
+      # ejecuta entero. Lo que vigila sobre todo es que la copia no se copie a
+      # si misma — sin eso, la de mañana lleva dentro la de hoy y en una semana
+      # la base no cabe.
+      - name: Respaldo automatico
+        run: python3 pruebas/respaldo.py

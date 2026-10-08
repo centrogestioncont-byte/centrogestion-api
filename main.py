@@ -420,6 +420,19 @@ DATA_KEYS = [
     "pagosSocios", "gananciaExtra", "tasasDia", "_tasasDiaMeta", "gastos_socios",
     "compromisos", "_deletedMerge", "histBalance", "histTasas", "histSaldos",
     "ajustesSaldo",
+    # 08/10/2026. Faltaban las tres, y guardar_estado recorre ESTA lista:
+    # una clave que no este aqui no se escribe nunca en Mongo. O sea que
+    # viajaban del navegador al servidor y el servidor las tiraba, sin un
+    # solo error. Medido comparando las dos listas: la app manda 36 claves
+    # y el servidor guardaba 33.
+    #   histApertura   el historial de la apertura (ARREGLO 94), que existe
+    #                  justo para contestar "¿cuanto era antes?" cuando el
+    #                  otro aparato la cambia. No se guardaba ninguna linea.
+    #   histComp       lo que apunta de la competencia, indexado por fecha.
+    #                  CLAUDE.md lo pide en DATA_KEYS a proposito, para que
+    #                  se una entre los dos aparatos en vez de pisarse.
+    #   mapaBinance    a que cuenta va cada operacion importada de Binance.
+    "histApertura", "histComp", "mapaBinance",
     # ARREGLO 61 (15/09/2026): "_modCampos" son las marcas de quien toco que
     # clave de config y cuando. El navegador las manda en cada guardado y
     # hasta ahora el servidor NO las guardaba —no estaban en esta lista— asi
@@ -443,6 +456,138 @@ MERGE_BLOQUES = {
 
 RENUMERAR = ("brl", "vzla", "eeuu")
 DIAS_MARCA_MS = 2592000000   # 30 dias, igual que _marcarBorradoMerge
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# QUE PUEDE ESCRIBIR CADA PERSONA (PASO 3 DE LA AUDITORIA DEL 08/10/2026)
+# ══════════════════════════════════════════════════════════════════════════
+#
+# Sus palabras: "los permisos que yo le doy, por lo menos que un dia yo quiero
+# que registren egresos. O quiero que registren prestamo, o quiero que
+# registren un gasto. Yo solo activo a los que yo crea conveniente."
+#
+# Las casillas de la FASE B ya hacen eso... en PANTALLA. Lo que no hacian es
+# nada aqui: PUT /estado solo comprobaba "editar", asi que cualquier persona
+# que pudiera registrar una remesa podia reescribir los prestamos, los
+# egresos y los cierres de mes aunque esas pestanas no le aparecieran. Le
+# bastaba con abrir las herramientas del navegador. O sea que era de los
+# candados que parecen candado y no lo son, que es peor que ninguno.
+#
+# ── Es una lista de claves GUARDADAS, no de claves permitidas ────────────
+#
+# Y es a proposito, por una asimetria que en esta app no se negocia: una
+# clave que no este aqui pasa igual que siempre. Al reves —permitir solo lo
+# apuntado— un flujo que toque una clave que nadie previo se perderia EN
+# SILENCIO, y eso aqui es contabilidad descuadrada. Un guardado de mas es el
+# estado de hoy; uno de menos es dinero perdido.
+#
+# ── Lo que NO se guarda, y por que ──────────────────────────────────────
+#
+# Medido recorriendo el archivo entero y anotando, clave por clave, QUE
+# funciones la escriben (no deducido: registrar una remesa toca mas de lo
+# que parece). Quedan fuera:
+#
+#   cuentas, capital          registrar una remesa mueve los saldos
+#   inventarioUsdt            y consume lotes del FIFO
+#   inventarioUsdt_cerrado
+#   cuentasCobrar             una remesa PENDIENTE crea la fila por cobrar
+#                             (saveTx y saveTxEE escriben aqui) — guardarla
+#                             por el permiso "cobrar" romperia justo lo que
+#                             un operador tiene que poder hacer
+#   movimientosCapital        lo escribe registrarMovimientoCapital, que la
+#                             llama la propia remesa
+#   brl, vzla                 son lo que el operador registra; es su trabajo
+#   clientes                  tienen su propia ruta (/clientes) y
+#                             _aplicarEstadoDeApi ignora la copia que venga
+#                             en el bloque de estado: guardarla aqui no
+#                             haria nada
+#   los historiales           van indexados por fecha y se unen
+#   _deleted, _deletedMerge   son la infraestructura de la fusion; sin ellas
+#   _modCampos                los dos aparatos se pisan
+#
+CLAVES_GUARDADAS = {
+    # cada una la escriben SOLO las funciones de su propia pantalla
+    "prestamos":          "prestamos",            # rPrestamos, savePr
+    "egresos":            "egresos",              # saveEg, pagarCompromiso, generarFijasMes
+    "egresos_personales": "egresos",              # saveEgPersonal, rMiGestion
+    "cierresMes":         "cierre",               # ejecutarCierreMes, reabrirMes
+    "pagosSocios":        "cierre",               # savePagoSocio
+    "gastos_socios":      "cierre",               # saveGastoSocio, saveGastoSocioForm
+    "deudas_paul":        "dash_eeuu",            # saveDeudaPaul, pagarPaul
+    "gastos_eeuu":        "dash_eeuu",            # saveGE, pagarPaul
+    "eeuu":               "nueva_eeuu",           # saveTxEE
+    "traspasos":          "traspasos",            # saveTraspaso
+    "config":             "config_admin",         # las comisiones, el % de sueldo, la apertura
+    "ajustesSaldo":       "capital_total",        # updateCuentaSaldo, editarSaldoCuentaEnConfig
+    "tasasDia":           "calculadora",          # setTasaDia
+    "_tasasDiaMeta":      "calculadora",          # setTasaDia, soltarTasaDia
+    "mapaBinance":        "inventario_usdt",      # _binFijarCuenta
+}
+
+# Lo que trae puesto cada rol. ESTO NO ES EL PERMISO: es lo que vale cuando
+# la persona todavia no tiene esa casilla decidida.
+#
+# Tiene que ser la misma tabla que PERMISOS_POR_ROL en index.html, y que sea
+# la misma no lo puede comprobar ninguna prueba: los dos repositorios no se
+# ven entre si. Por eso pruebas/permisos.py la fija valor por valor — para
+# que cambiarla cueste tocar la prueba a proposito y no se mueva de lado.
+#
+# Hace falta porque la app manda la lista COMPLETA al guardar permisos
+# (FASE B) pero los usuarios creados por POST /usuarios salen con solo
+# {"editar": ...}. Sin los valores por omision, a esos se les cerraria todo
+# de golpe — que es exactamente lo que la FASE B evito en el navegador.
+PERMISOS_POR_ROL = {
+    "admin":  "*",
+    "lector": {"todo": True, "salvo": ["editar"]},
+    "brl":    {"si": ["editar", "mi_ganancia", "op_diario", "nueva", "clientes"]},
+    "vzla":   {"si": ["editar", "mi_ganancia", "op_diario", "nueva", "clientes"]},
+    "eeuu":   {"si": ["editar", "mi_ganancia", "op_diario", "nueva_eeuu",
+                      "clientes", "dash_eeuu"]},
+}
+
+
+def tiene_permiso(usuario, clave):
+    """Equivalente de tienePermiso() del navegador. El rol es un punto de
+    partida, no el permiso: manda lo que Mongo guarda para esa persona y el
+    rol solo decide las casillas que no estan decididas."""
+    usuario = usuario or {}
+    if usuario.get("rol") == "admin":
+        return True
+    permisos = usuario.get("permisos") or {}
+    if clave in permisos:
+        return bool(permisos[clave])
+    omision = PERMISOS_POR_ROL.get(usuario.get("rol"))
+    if omision == "*":
+        return True
+    if not isinstance(omision, dict):
+        return False
+    if omision.get("todo"):
+        return clave not in (omision.get("salvo") or [])
+    return clave in (omision.get("si") or [])
+
+
+def filtrar_por_permisos(entrante, usuario):
+    """Saca del bloque entrante las claves que esta persona no puede tocar.
+
+    Devuelve (bloque_filtrado, claves_rechazadas). Quitar una clave es
+    seguro: fusionar_estado hace `if k not in entrante: continue`, o sea que
+    una clave que no llega se conserva TAL CUAL como estaba guardada. No se
+    borra nada; simplemente lo que mando esa persona no cuenta.
+
+    Ojo: esto no es un aviso cosmetico. Si alguien escribio algo que no le
+    tocaba, el aparato lo nota solo —adopta lo que contesta el servidor y el
+    aviso de choque (ARREGLO 67) compara lo que mando contra lo que quedo—
+    pero ademas se anota en la auditoria del servidor, que es la unica que no
+    depende de que el navegador quiera anotarla.
+    """
+    if not isinstance(entrante, dict):
+        return entrante, []
+    rechazadas = [k for k, permiso in CLAVES_GUARDADAS.items()
+                  if k in entrante and not tiene_permiso(usuario, permiso)]
+    if not rechazadas:
+        return entrante, []
+    limpio = {k: v for k, v in entrante.items() if k not in rechazadas}
+    return limpio, sorted(rechazadas)
 
 
 # ── Equivalencias exactas con JavaScript ─────────────────────────────────
@@ -2320,6 +2465,12 @@ class Manejador(BaseHTTPRequestHandler):
                 if not isinstance(cuerpo, dict) or not isinstance(cuerpo.get("estado"), dict):
                     return self._responder(400, {"ok": False, "error": "falta el estado"})
                 entrante = cuerpo["estado"]
+                # PASO 3: el permiso decide QUE puede escribir, no solo si
+                # puede escribir. Lo que esta persona no puede tocar se saca
+                # del bloque antes de fusionar; fusionar_estado conserva tal
+                # cual cualquier clave que no llegue, asi que no se borra
+                # nada: lo que mando simplemente no cuenta.
+                entrante, rechazadas = filtrar_por_permisos(entrante, yo)
                 ts_entrante = cuerpo.get("_ts")
                 if not _es_numero(ts_entrante):
                     ts_entrante = 0
@@ -2345,11 +2496,21 @@ class Manejador(BaseHTTPRequestHandler):
                     escritas = guardar_estado(fusionado, guardado, ts_nuevo)
             except PyMongoError:
                 return self._responder(503, {"ok": False, "error": "base no disponible"})
+            if rechazadas:
+                # La auditoria del navegador es voluntaria —la escribe la app
+                # si quiere—. Esta no: la escribe el servidor, que es el que
+                # dijo no.
+                try:
+                    anotar_auditoria(yo, "escritura rechazada",
+                                     "sin permiso para: " + ", ".join(rechazadas))
+                except PyMongoError:
+                    pass
             return self._responder(200, {
                 "ok": True,
                 "estado": fusionado,
                 "_ts": ts_nuevo,
                 "clavesEscritas": escritas,
+                "clavesRechazadas": rechazadas,
             })
 
         if len(partes) == 2 and partes[0] == "usuarios":

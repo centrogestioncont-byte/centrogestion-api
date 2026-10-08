@@ -42,3 +42,18 @@ jobs:
       # la base no cabe.
       - name: Respaldo automatico
         run: python3 pruebas/respaldo.py
+
+      # Paso 3 de la auditoria: que el servidor haga cumplir QUE puede
+      # escribir cada persona. Lo que mas vigila no es lo que se prohibe, es
+      # lo que NO se puede prohibir: registrar una remesa mueve los saldos,
+      # consume lotes del FIFO y crea la fila por cobrar si queda pendiente.
+      # Guardar cualquiera de esas claves le romperia su trabajo al operador,
+      # y en silencio.
+      - name: Permisos de escritura
+        run: python3 pruebas/permisos.py
+
+      # Y el camino de verdad, con el servidor levantado y peticiones HTTP
+      # reales. Una guardia estructural dice que el codigo esta escrito; esto
+      # dice que funciona (la leccion del ARREGLO 91).
+      - name: Permisos de escritura, de punta a punta
+        run: python3 pruebas/permisos_e2e.py

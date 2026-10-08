@@ -566,6 +566,101 @@ def tiene_permiso(usuario, clave):
     return clave in (omision.get("si") or [])
 
 
+# ══════════════════════════════════════════════════════════════════════════
+# QUIEN REGISTRO CADA COSA, Y QUE NO SE PUEDA FALSEAR
+# ══════════════════════════════════════════════════════════════════════════
+#
+# Sus palabras: "me gustaria que yo como administradora pueda ver quien
+# registro cada cosa. O sea, operado por fulano de tal."
+#
+# El navegador ya sella cada registro con _por (quien lo creo) y _porUlt
+# (quien lo toco la ultima vez), y lo hace en un solo sitio para que una
+# funcion nueva quede cubierta sola. Pero ese sello se puede escribir a mano
+# desde las herramientas del navegador: sirve para verlo al momento, no para
+# fiarse.
+#
+# Esto es lo que lo hace fiable. El servidor sabe de quien es la sesion —el
+# testigo no se puede inventar— asi que vuelve a sellar TODO lo que acepta de
+# ese guardado con el nombre de verdad. Lo que mande el navegador en esos dos
+# campos da igual.
+#
+# Se sella solo lo que ESTE guardado cambio, comparando contra lo que habia.
+# Un aparato manda su copia entera, con los registros de todo el mundo: sellar
+# por "viene en el bloque" le pondria el nombre de quien guarda a las 192
+# remesas. Es el mismo error que ya costo el aviso de 14 lineas.
+SELLO_CREO = "_por"
+SELLO_ULT = "_porUlt"
+
+
+def _nombre_de(usuario):
+    u = usuario or {}
+    return u.get("nombre") or u.get("correo") or ""
+
+
+def _sin_sellos(registro):
+    """El registro sin los campos que no cuentan para decidir si cambio.
+
+    _mod, _por y _porUlt los pone la propia maquinaria. Si contaran, sellar
+    haria que el registro pareciera cambiado en el guardado siguiente, y se
+    volveria a sellar para siempre."""
+    return {k: v for k, v in registro.items()
+            if k not in ("_mod", SELLO_CREO, SELLO_ULT)}
+
+
+def sellar_quien(fusionado, guardado, usuario):
+    """Sella con el nombre real lo que este guardado creo o cambio.
+
+    Devuelve cuantos registros se sellaron. No toca nada mas: los registros
+    que no cambiaron conservan el sello que ya tenian, venga de quien venga.
+    """
+    nombre = _nombre_de(usuario)
+    if not nombre or not isinstance(fusionado, dict):
+        return 0
+    guardado = guardado or {}
+    sellados = 0
+    for clave in MERGE_FIELDS:
+        nuevos = fusionado.get(clave)
+        if not isinstance(nuevos, list):
+            continue
+        campo_id = MERGE_ID_FIELD.get(clave, "id")
+        antes = {}
+        for it in (guardado.get(clave) or []):
+            if isinstance(it, dict) and it.get(campo_id) is not None:
+                antes[_clave_js(it[campo_id])] = it
+        for it in nuevos:
+            if not isinstance(it, dict) or it.get(campo_id) is None:
+                continue
+            viejo = antes.get(_clave_js(it[campo_id]))
+            if viejo is None:
+                # Registro nuevo: lo creo quien esta guardando.
+                it[SELLO_CREO] = nombre
+                it[SELLO_ULT] = nombre
+                sellados += 1
+            elif json.dumps(_sin_sellos(viejo), ensure_ascii=False, sort_keys=True,
+                            default=str) != json.dumps(_sin_sellos(it), ensure_ascii=False,
+                                                       sort_keys=True, default=str):
+                # Cambio de verdad. Quien lo creo NO se toca: si el registro
+                # ya lo tenia, se respeta; y si es de antes del sello, no hay
+                # de donde sacarlo y se queda sin el —inventarlo seria peor.
+                if viejo.get(SELLO_CREO):
+                    it[SELLO_CREO] = viejo[SELLO_CREO]
+                it[SELLO_ULT] = nombre
+                sellados += 1
+            else:
+                # No cambio: se deja EXACTAMENTE como estaba guardado. Asi un
+                # aparato no puede reescribir el sello de un registro ajeno
+                # mandandolo con otro nombre y sin tocar nada mas.
+                if viejo.get(SELLO_CREO) is not None:
+                    it[SELLO_CREO] = viejo[SELLO_CREO]
+                else:
+                    it.pop(SELLO_CREO, None)
+                if viejo.get(SELLO_ULT) is not None:
+                    it[SELLO_ULT] = viejo[SELLO_ULT]
+                else:
+                    it.pop(SELLO_ULT, None)
+    return sellados
+
+
 def aplicar_permisos(fusionado, guardado, usuario):
     """Devuelve (estado, rechazadas) despues de deshacer lo que esta persona
     no podia tocar.
@@ -991,7 +1086,13 @@ def unir_marcas(a, b, ahora_ms=None):
                 if not isinstance(m, dict) or not _es_numero(m.get("ts")) or m["ts"] <= corte:
                     continue
                 if not any(_igual_estricto(x.get("id"), m.get("id")) for x in actuales):
-                    actuales.append({"id": m.get("id"), "ts": m["ts"]})
+                    nueva = {"id": m.get("id"), "ts": m["ts"]}
+                    # Quien borro. Se reconstruia el diccionario a mano, asi
+                    # que cualquier campo de mas se perdia por el camino —y
+                    # un registro borrado ya no esta para llevar su sello.
+                    if m.get("por"):
+                        nueva["por"] = _texto(m.get("por"), 80)
+                    actuales.append(nueva)
     return {k: v for k, v in salida.items() if v}
 
 
@@ -2508,6 +2609,10 @@ class Manejador(BaseHTTPRequestHandler):
                     # al valor que tenia, y solo se avisa de lo que de verdad
                     # habria cambiado.
                     fusionado, rechazadas = aplicar_permisos(fusionado, guardado, yo)
+                    # Va DESPUES de los permisos: lo que no se dejo entrar ya
+                    # volvio a ser lo guardado, asi que no se sella como si
+                    # esta persona lo hubiera tocado.
+                    sellar_quien(fusionado, guardado, yo)
                     ts_nuevo = int(time.time() * 1000)
                     escritas = guardar_estado(fusionado, guardado, ts_nuevo)
             except PyMongoError:

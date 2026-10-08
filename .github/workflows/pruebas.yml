@@ -57,3 +57,11 @@ jobs:
       # dice que funciona (la leccion del ARREGLO 91).
       - name: Permisos de escritura, de punta a punta
         run: python3 pruebas/permisos_e2e.py
+
+      # El sello de quien registro cada cosa. Lo que mas vigila es lo
+      # contrario de lo que parece: no que se selle, sino que NO se selle de
+      # mas. Un aparato manda su copia ENTERA del estado, con los registros
+      # de todo el mundo; sellar por "viene en el bloque" le pondria el
+      # nombre de quien guarda a las 192 remesas de ella.
+      - name: Quien registro cada cosa
+        run: python3 pruebas/sello.py

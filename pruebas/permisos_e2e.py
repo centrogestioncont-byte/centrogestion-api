@@ -201,6 +201,34 @@ est = get("T-AD")["estado"]
 for k in ("histApertura", "histComp", "mapaBinance"):
     ok(k in est and est[k], "'%s' quedo guardada" % k, est.get(k))
 
+print("\n== El sello de quien, de punta a punta ==")
+
+# El operador crea una remesa y, de paso, intenta ponerle a OTRA el nombre de
+# ella. Lo primero tiene que quedar sellado con su nombre; lo segundo, no.
+cod, d = put("T-OP", {
+    "brl": [
+        {"_uid": "r1", "cliente": "JUAN", "pr": 1.5, "_mod": AHORA,
+         "_por": "EL JEFE", "_porUlt": "EL JEFE"},
+        {"_uid": "rNuevo", "cliente": "PEDRO", "pr": 2.0, "_mod": AHORA,
+         "_por": "EL JEFE", "_porUlt": "EL JEFE"},
+    ],
+}, ts=6000)
+ok(cod == 200, "guarda bien", cod)
+est = get("T-AD")["estado"]
+porUid = {r.get("_uid"): r for r in est["brl"]}
+ok(porUid.get("rNuevo", {}).get("_por") == "Operador",
+   "la remesa nueva queda sellada con QUIEN ES, no con lo que mando",
+   porUid.get("rNuevo"))
+ok(porUid.get("r1", {}).get("_porUlt") == "Operador",
+   "y la que cambio tambien", porUid.get("r1"))
+
+# Y guardando otra vez sin tocar nada, nada se vuelve a sellar: si _por
+# contara para decidir si algo cambio, esto se sellaria para siempre.
+antes = json.dumps(get("T-AD")["estado"]["brl"], sort_keys=True)
+put("T-OP", get("T-OP")["estado"], ts=7000)
+ok(json.dumps(get("T-AD")["estado"]["brl"], sort_keys=True) == antes,
+   "y mandar el bloque entero sin tocar nada no cambia ningun sello")
+
 srv.shutdown()
 print("\n" + ("FALLARON %d" % len(fallos) if fallos else "Todo en orden."))
 sys.exit(1 if fallos else 0)

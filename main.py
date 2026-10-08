@@ -1010,7 +1010,12 @@ def _escapar_regex(t):
 # De "usuarios" se saca el campo de la clave cifrada: el archivo se baja al
 # telefono y se sube a la nube, y ahi no tiene por que viajar. Al restaurar,
 # las claves se vuelven a poner; los datos del negocio no dependen de eso.
-COLECCIONES_FUERA = ["sesiones"]
+# ARREGLO 103: "respaldos" va FUERA, y no es un detalle. armar_respaldo()
+# recorre todas las colecciones de la base: sin esta linea, la copia de hoy se
+# llevaria dentro las trece anteriores, la de mañana esas catorce otra vez, y
+# en una semana la base no cabe. (COL_RESPALDOS se define mas abajo, con el
+# resto del motor; aqui va el literal para no mover el orden del archivo.)
+COLECCIONES_FUERA = ["sesiones", "respaldos"]
 CAMPOS_FUERA = {"usuarios": ["clave"]}
 
 # Colecciones que SI se respaldan pero NUNCA se restauran.
@@ -1061,6 +1066,121 @@ def armar_respaldo(solo_resumen=False):
     if not solo_resumen:
         respaldo["datos"] = datos
     return respaldo
+
+
+# ── ARREGLO 103 · el respaldo se hace SOLO ────────────────────────────────
+#
+# armar_respaldo() existe desde hace tiempo, pero solo cuando alguien se lo
+# pide a mano. Auditado el 07/10: no habia nada programado, asi que lo unico
+# que separaba sus datos de la nada era que se acordara de exportar.
+#
+# LO QUE ESTO CUBRE Y LO QUE NO, que es la mitad importante:
+#
+#   un borrado por error, una fusion que se come algo   SI lo cubre
+#   perder la base entera (la cuenta, el proveedor)     NO lo cubre
+#
+# Una copia DENTRO de la misma base no sobrevive a que se pierda la base. Por
+# eso esto no sustituye a que ella se baje un archivo de vez en cuando: lo que
+# hace es que esa descarga sea de ayer y no de hace tres meses, y que la app
+# pueda decirle cuanto hace que no se baja una.
+COL_RESPALDOS = "respaldos"
+RESPALDOS_QUE_SE_GUARDAN = 14      # dos semanas de copias diarias
+RESPALDO_CADA_HORAS = 23           # se intenta una vez al dia
+_candado_respaldo = threading.Lock()
+
+
+def _clave_dia(momento=None):
+    return (momento or ahora()).strftime("%Y-%m-%d")
+
+
+def hacer_respaldo(forzado=False):
+    """Guarda una copia del dia. Devuelve la clave si la hizo, None si no tocaba.
+
+    Va bajo el MISMO candado que las escrituras del estado: el guardado toca
+    varios documentos, uno por clave, y copiar en medio se llevaria un estado
+    a medio armar —con las remesas nuevas y los saldos viejos—. Es la misma
+    razon por la que GET /estado tambien lo pide.
+    """
+    base = obtener_base()
+    if base is None:
+        return None
+    with _candado_respaldo:
+        clave = _clave_dia()
+        if not forzado and base[COL_RESPALDOS].find_one({"_id": clave}, {"_id": 1}):
+            return None
+        with _candado_estado:
+            copia = armar_respaldo()
+        if not copia:
+            return None
+        base[COL_RESPALDOS].replace_one(
+            {"_id": clave},
+            {
+                "_id": clave,
+                "ts": ahora_ms(),
+                "fecha": ahora().isoformat(),
+                "resumen": copia.get("_respaldo", {}),
+                "datos": copia.get("datos", {}),
+            },
+            upsert=True,
+        )
+        # Podar lo viejo aprovechando que ya estamos escribiendo. Se ordena por
+        # la clave, que es la fecha: no hace falta mirar dentro de cada copia.
+        claves = sorted(
+            [d["_id"] for d in base[COL_RESPALDOS].find({}, {"_id": 1})],
+            reverse=True,
+        )
+        sobran = claves[RESPALDOS_QUE_SE_GUARDAN:]
+        if sobran:
+            base[COL_RESPALDOS].delete_many({"_id": {"$in": sobran}})
+        return clave
+
+
+def estado_respaldos():
+    """Cuantas copias hay y de cuando es la ultima. Lo lee la app."""
+    base = obtener_base()
+    if base is None:
+        return {"ok": False, "error": "base no disponible"}
+    docs = list(base[COL_RESPALDOS].find({}, {"datos": 0}).sort("_id", -1))
+    if not docs:
+        return {"ok": True, "copias": 0, "ultima": None, "guarda": RESPALDOS_QUE_SE_GUARDAN}
+    u = docs[0]
+    return {
+        "ok": True,
+        "copias": len(docs),
+        "guarda": RESPALDOS_QUE_SE_GUARDAN,
+        "ultima": {
+            "dia": u["_id"],
+            "ts": u.get("ts"),
+            "fecha": u.get("fecha"),
+            "registros": (u.get("resumen") or {}).get("total"),
+        },
+        "dias": [d["_id"] for d in docs],
+    }
+
+
+def _ronda_de_respaldo():
+    """Hilo de fondo: lo intenta cada hora y solo hace uno al dia.
+
+    Se mira la hora en vez de dormir 24 h de golpe porque este servidor se
+    reinicia con cada despliegue: durmiendo un dia entero, una semana de
+    despliegues seguidos no dejaria ni una copia.
+    """
+    while True:
+        try:
+            clave = hacer_respaldo()
+            if clave:
+                print("Respaldo automatico guardado: %s" % clave, flush=True)
+        except Exception as e:
+            # Un fallo aqui NO puede tumbar la API: la app tiene que seguir
+            # contestando aunque la copia de hoy no se pueda hacer.
+            print("AVISO: no se pudo hacer el respaldo: %r" % e, flush=True)
+        time.sleep(60 * 60)
+
+
+def arrancar_respaldo_automatico():
+    h = threading.Thread(target=_ronda_de_respaldo, name="respaldo", daemon=True)
+    h.start()
+    return h
 
 
 # Las colecciones que la aplicacion usa de verdad. Un nombre fuera de esta
@@ -1823,6 +1943,18 @@ class Manejador(BaseHTTPRequestHandler):
                 return self._responder(503, {"ok": False, "error": "base no disponible"})
             return self._responder(200, {"ok": True, "entradas": entradas})
 
+        if ruta == "/respaldo/estado":
+            # Cuantas copias automaticas hay y de cuando es la ultima. La app
+            # lo enseña en Configuracion: si nadie lo ve, nadie se entera de
+            # que llevan tres semanas sin hacerse.
+            try:
+                usuario, error = self._admin()
+                if error:
+                    return self._responder(*error)
+                return self._responder(200, estado_respaldos())
+            except PyMongoError:
+                return self._responder(503, {"ok": False, "error": "base no disponible"})
+
         if ruta in ("/respaldo", "/respaldo/resumen"):
             try:
                 usuario, error = self._admin()
@@ -2365,6 +2497,14 @@ if __name__ == "__main__":
         # que la API arranque igual: asi /salud sigue sirviendo para
         # diagnosticar en vez de quedar todo caido sin explicacion
         print("AVISO: no se pudo preparar la base: %s" % type(e).__name__, flush=True)
+    # ARREGLO 103: la copia diaria. Va despues de preparar_base() y antes de
+    # escuchar: si la base no esta, el hilo lo dice y lo reintenta a la hora,
+    # pero la API arranca igual.
+    try:
+        arrancar_respaldo_automatico()
+        print("Respaldo automatico en marcha (una copia al dia)", flush=True)
+    except Exception as e:
+        print("AVISO: no arranco el respaldo automatico: %r" % e, flush=True)
     puerto = int(os.environ.get("PORT", "8080"))
     servidor = ThreadingHTTPServer(("0.0.0.0", puerto), Manejador)
     print("API escuchando en el puerto %d" % puerto, flush=True)

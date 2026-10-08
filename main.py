@@ -420,6 +420,19 @@ DATA_KEYS = [
     "pagosSocios", "gananciaExtra", "tasasDia", "_tasasDiaMeta", "gastos_socios",
     "compromisos", "_deletedMerge", "histBalance", "histTasas", "histSaldos",
     "ajustesSaldo",
+    # 08/10/2026. Faltaban las tres, y guardar_estado recorre ESTA lista:
+    # una clave que no este aqui no se escribe nunca en Mongo. O sea que
+    # viajaban del navegador al servidor y el servidor las tiraba, sin un
+    # solo error. Medido comparando las dos listas: la app manda 36 claves
+    # y el servidor guardaba 33.
+    #   histApertura   el historial de la apertura (ARREGLO 94), que existe
+    #                  justo para contestar "¿cuanto era antes?" cuando el
+    #                  otro aparato la cambia. No se guardaba ninguna linea.
+    #   histComp       lo que apunta de la competencia, indexado por fecha.
+    #                  CLAUDE.md lo pide en DATA_KEYS a proposito, para que
+    #                  se una entre los dos aparatos en vez de pisarse.
+    #   mapaBinance    a que cuenta va cada operacion importada de Binance.
+    "histApertura", "histComp", "mapaBinance",
     # ARREGLO 61 (15/09/2026): "_modCampos" son las marcas de quien toco que
     # clave de config y cuando. El navegador las manda en cada guardado y
     # hasta ahora el servidor NO las guardaba —no estaban en esta lista— asi
@@ -443,6 +456,250 @@ MERGE_BLOQUES = {
 
 RENUMERAR = ("brl", "vzla", "eeuu")
 DIAS_MARCA_MS = 2592000000   # 30 dias, igual que _marcarBorradoMerge
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# QUE PUEDE ESCRIBIR CADA PERSONA (PASO 3 DE LA AUDITORIA DEL 08/10/2026)
+# ══════════════════════════════════════════════════════════════════════════
+#
+# Sus palabras: "los permisos que yo le doy, por lo menos que un dia yo quiero
+# que registren egresos. O quiero que registren prestamo, o quiero que
+# registren un gasto. Yo solo activo a los que yo crea conveniente."
+#
+# Las casillas de la FASE B ya hacen eso... en PANTALLA. Lo que no hacian es
+# nada aqui: PUT /estado solo comprobaba "editar", asi que cualquier persona
+# que pudiera registrar una remesa podia reescribir los prestamos, los
+# egresos y los cierres de mes aunque esas pestanas no le aparecieran. Le
+# bastaba con abrir las herramientas del navegador. O sea que era de los
+# candados que parecen candado y no lo son, que es peor que ninguno.
+#
+# ── Es una lista de claves GUARDADAS, no de claves permitidas ────────────
+#
+# Y es a proposito, por una asimetria que en esta app no se negocia: una
+# clave que no este aqui pasa igual que siempre. Al reves —permitir solo lo
+# apuntado— un flujo que toque una clave que nadie previo se perderia EN
+# SILENCIO, y eso aqui es contabilidad descuadrada. Un guardado de mas es el
+# estado de hoy; uno de menos es dinero perdido.
+#
+# ── Lo que NO se guarda, y por que ──────────────────────────────────────
+#
+# Medido recorriendo el archivo entero y anotando, clave por clave, QUE
+# funciones la escriben (no deducido: registrar una remesa toca mas de lo
+# que parece). Quedan fuera:
+#
+#   cuentas, capital          registrar una remesa mueve los saldos
+#   inventarioUsdt            y consume lotes del FIFO
+#   inventarioUsdt_cerrado
+#   cuentasCobrar             una remesa PENDIENTE crea la fila por cobrar
+#                             (saveTx y saveTxEE escriben aqui) — guardarla
+#                             por el permiso "cobrar" romperia justo lo que
+#                             un operador tiene que poder hacer
+#   movimientosCapital        lo escribe registrarMovimientoCapital, que la
+#                             llama la propia remesa
+#   brl, vzla                 son lo que el operador registra; es su trabajo
+#   clientes                  tienen su propia ruta (/clientes) y
+#                             _aplicarEstadoDeApi ignora la copia que venga
+#                             en el bloque de estado: guardarla aqui no
+#                             haria nada
+#   los historiales           van indexados por fecha y se unen
+#   _deleted, _deletedMerge   son la infraestructura de la fusion; sin ellas
+#   _modCampos                los dos aparatos se pisan
+#
+CLAVES_GUARDADAS = {
+    # cada una la escriben SOLO las funciones de su propia pantalla
+    "prestamos":          "prestamos",            # rPrestamos, savePr
+    "egresos":            "egresos",              # saveEg, pagarCompromiso, generarFijasMes
+    "egresos_personales": "egresos",              # saveEgPersonal, rMiGestion
+    "cierresMes":         "cierre",               # ejecutarCierreMes, reabrirMes
+    "pagosSocios":        "cierre",               # savePagoSocio
+    "gastos_socios":      "cierre",               # saveGastoSocio, saveGastoSocioForm
+    "deudas_paul":        "dash_eeuu",            # saveDeudaPaul, pagarPaul
+    "gastos_eeuu":        "dash_eeuu",            # saveGE, pagarPaul
+    "eeuu":               "nueva_eeuu",           # saveTxEE
+    "traspasos":          "traspasos",            # saveTraspaso
+    "config":             "config_admin",         # las comisiones, el % de sueldo, la apertura
+    "ajustesSaldo":       "capital_total",        # updateCuentaSaldo, editarSaldoCuentaEnConfig
+    "tasasDia":           "calculadora",          # setTasaDia
+    "_tasasDiaMeta":      "calculadora",          # setTasaDia, soltarTasaDia
+    "mapaBinance":        "inventario_usdt",      # _binFijarCuenta
+}
+
+# Lo que trae puesto cada rol. ESTO NO ES EL PERMISO: es lo que vale cuando
+# la persona todavia no tiene esa casilla decidida.
+#
+# Tiene que ser la misma tabla que PERMISOS_POR_ROL en index.html, y que sea
+# la misma no lo puede comprobar ninguna prueba: los dos repositorios no se
+# ven entre si. Por eso pruebas/permisos.py la fija valor por valor — para
+# que cambiarla cueste tocar la prueba a proposito y no se mueva de lado.
+#
+# Hace falta porque la app manda la lista COMPLETA al guardar permisos
+# (FASE B) pero los usuarios creados por POST /usuarios salen con solo
+# {"editar": ...}. Sin los valores por omision, a esos se les cerraria todo
+# de golpe — que es exactamente lo que la FASE B evito en el navegador.
+PERMISOS_POR_ROL = {
+    "admin":  "*",
+    "lector": {"todo": True, "salvo": ["editar"]},
+    "brl":    {"si": ["editar", "mi_ganancia", "op_diario", "nueva", "clientes"]},
+    "vzla":   {"si": ["editar", "mi_ganancia", "op_diario", "nueva", "clientes"]},
+    "eeuu":   {"si": ["editar", "mi_ganancia", "op_diario", "nueva_eeuu",
+                      "clientes", "dash_eeuu"]},
+}
+
+
+def tiene_permiso(usuario, clave):
+    """Equivalente de tienePermiso() del navegador. El rol es un punto de
+    partida, no el permiso: manda lo que Mongo guarda para esa persona y el
+    rol solo decide las casillas que no estan decididas."""
+    usuario = usuario or {}
+    if usuario.get("rol") == "admin":
+        return True
+    permisos = usuario.get("permisos") or {}
+    if clave in permisos:
+        return bool(permisos[clave])
+    omision = PERMISOS_POR_ROL.get(usuario.get("rol"))
+    if omision == "*":
+        return True
+    if not isinstance(omision, dict):
+        return False
+    if omision.get("todo"):
+        return clave not in (omision.get("salvo") or [])
+    return clave in (omision.get("si") or [])
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# QUIEN REGISTRO CADA COSA, Y QUE NO SE PUEDA FALSEAR
+# ══════════════════════════════════════════════════════════════════════════
+#
+# Sus palabras: "me gustaria que yo como administradora pueda ver quien
+# registro cada cosa. O sea, operado por fulano de tal."
+#
+# El navegador ya sella cada registro con _por (quien lo creo) y _porUlt
+# (quien lo toco la ultima vez), y lo hace en un solo sitio para que una
+# funcion nueva quede cubierta sola. Pero ese sello se puede escribir a mano
+# desde las herramientas del navegador: sirve para verlo al momento, no para
+# fiarse.
+#
+# Esto es lo que lo hace fiable. El servidor sabe de quien es la sesion —el
+# testigo no se puede inventar— asi que vuelve a sellar TODO lo que acepta de
+# ese guardado con el nombre de verdad. Lo que mande el navegador en esos dos
+# campos da igual.
+#
+# Se sella solo lo que ESTE guardado cambio, comparando contra lo que habia.
+# Un aparato manda su copia entera, con los registros de todo el mundo: sellar
+# por "viene en el bloque" le pondria el nombre de quien guarda a las 192
+# remesas. Es el mismo error que ya costo el aviso de 14 lineas.
+SELLO_CREO = "_por"
+SELLO_ULT = "_porUlt"
+
+
+def _nombre_de(usuario):
+    u = usuario or {}
+    return u.get("nombre") or u.get("correo") or ""
+
+
+def _sin_sellos(registro):
+    """El registro sin los campos que no cuentan para decidir si cambio.
+
+    _mod, _por y _porUlt los pone la propia maquinaria. Si contaran, sellar
+    haria que el registro pareciera cambiado en el guardado siguiente, y se
+    volveria a sellar para siempre."""
+    return {k: v for k, v in registro.items()
+            if k not in ("_mod", SELLO_CREO, SELLO_ULT)}
+
+
+def sellar_quien(fusionado, guardado, usuario):
+    """Sella con el nombre real lo que este guardado creo o cambio.
+
+    Devuelve cuantos registros se sellaron. No toca nada mas: los registros
+    que no cambiaron conservan el sello que ya tenian, venga de quien venga.
+    """
+    nombre = _nombre_de(usuario)
+    if not nombre or not isinstance(fusionado, dict):
+        return 0
+    guardado = guardado or {}
+    sellados = 0
+    for clave in MERGE_FIELDS:
+        nuevos = fusionado.get(clave)
+        if not isinstance(nuevos, list):
+            continue
+        campo_id = MERGE_ID_FIELD.get(clave, "id")
+        antes = {}
+        for it in (guardado.get(clave) or []):
+            if isinstance(it, dict) and it.get(campo_id) is not None:
+                antes[_clave_js(it[campo_id])] = it
+        for it in nuevos:
+            if not isinstance(it, dict) or it.get(campo_id) is None:
+                continue
+            viejo = antes.get(_clave_js(it[campo_id]))
+            if viejo is None:
+                # Registro nuevo: lo creo quien esta guardando.
+                it[SELLO_CREO] = nombre
+                it[SELLO_ULT] = nombre
+                sellados += 1
+            elif json.dumps(_sin_sellos(viejo), ensure_ascii=False, sort_keys=True,
+                            default=str) != json.dumps(_sin_sellos(it), ensure_ascii=False,
+                                                       sort_keys=True, default=str):
+                # Cambio de verdad. Quien lo creo NO se toca: si el registro
+                # ya lo tenia, se respeta; y si es de antes del sello, no hay
+                # de donde sacarlo y se queda sin el —inventarlo seria peor.
+                if viejo.get(SELLO_CREO):
+                    it[SELLO_CREO] = viejo[SELLO_CREO]
+                it[SELLO_ULT] = nombre
+                sellados += 1
+            else:
+                # No cambio: se deja EXACTAMENTE como estaba guardado. Asi un
+                # aparato no puede reescribir el sello de un registro ajeno
+                # mandandolo con otro nombre y sin tocar nada mas.
+                if viejo.get(SELLO_CREO) is not None:
+                    it[SELLO_CREO] = viejo[SELLO_CREO]
+                else:
+                    it.pop(SELLO_CREO, None)
+                if viejo.get(SELLO_ULT) is not None:
+                    it[SELLO_ULT] = viejo[SELLO_ULT]
+                else:
+                    it.pop(SELLO_ULT, None)
+    return sellados
+
+
+def aplicar_permisos(fusionado, guardado, usuario):
+    """Devuelve (estado, rechazadas) despues de deshacer lo que esta persona
+    no podia tocar.
+
+    Va DESPUES de fusionar, y no antes, por una razon que se vio en la
+    primera prueba real: la app manda el bloque ENTERO en cada guardado, con
+    las 36 claves, haya cambiado algo o no. Filtrando por "esta la clave en
+    el bloque" se rechazaban las 14 guardadas en CADA guardado, y al operador
+    le salia un aviso de 14 lineas sin haber intentado tocar nada. Un aviso
+    permanente que no significa nada es lo que ensena a no leer los avisos, y
+    en esta app los avisos cuestan dinero.
+
+    Lo que se mira ahora es si permitirlo habria CAMBIADO lo guardado. Cada
+    clave se fusiona por su cuenta dentro de fusionar_estado —el bucle de
+    DATA_KEYS no cruza una clave con otra— asi que devolver una al valor que
+    tenia es exactamente lo mismo que no haberla dejado entrar, y ademas se
+    puede comparar contra lo que habia.
+    """
+    rechazadas = []
+    if not isinstance(fusionado, dict):
+        return fusionado, rechazadas
+    guardado = guardado or {}
+    for clave, permiso in CLAVES_GUARDADAS.items():
+        if clave not in fusionado or tiene_permiso(usuario, permiso):
+            continue
+        antes = guardado.get(clave)
+        # La misma comparacion que usa guardar_estado para decidir si una
+        # clave cambio de verdad.
+        iguales = (clave in guardado and
+                   json.dumps(antes, ensure_ascii=False, sort_keys=True, default=str) ==
+                   json.dumps(fusionado.get(clave), ensure_ascii=False,
+                              sort_keys=True, default=str))
+        if clave in guardado:
+            fusionado[clave] = antes
+        else:
+            del fusionado[clave]
+        if not iguales:
+            rechazadas.append(clave)
+    return fusionado, sorted(rechazadas)
 
 
 # ── Equivalencias exactas con JavaScript ─────────────────────────────────
@@ -829,7 +1086,13 @@ def unir_marcas(a, b, ahora_ms=None):
                 if not isinstance(m, dict) or not _es_numero(m.get("ts")) or m["ts"] <= corte:
                     continue
                 if not any(_igual_estricto(x.get("id"), m.get("id")) for x in actuales):
-                    actuales.append({"id": m.get("id"), "ts": m["ts"]})
+                    nueva = {"id": m.get("id"), "ts": m["ts"]}
+                    # Quien borro. Se reconstruia el diccionario a mano, asi
+                    # que cualquier campo de mas se perdia por el camino —y
+                    # un registro borrado ya no esta para llevar su sello.
+                    if m.get("por"):
+                        nueva["por"] = _texto(m.get("por"), 80)
+                    actuales.append(nueva)
     return {k: v for k, v in salida.items() if v}
 
 
@@ -1010,7 +1273,12 @@ def _escapar_regex(t):
 # De "usuarios" se saca el campo de la clave cifrada: el archivo se baja al
 # telefono y se sube a la nube, y ahi no tiene por que viajar. Al restaurar,
 # las claves se vuelven a poner; los datos del negocio no dependen de eso.
-COLECCIONES_FUERA = ["sesiones"]
+# ARREGLO 103: "respaldos" va FUERA, y no es un detalle. armar_respaldo()
+# recorre todas las colecciones de la base: sin esta linea, la copia de hoy se
+# llevaria dentro las trece anteriores, la de mañana esas catorce otra vez, y
+# en una semana la base no cabe. (COL_RESPALDOS se define mas abajo, con el
+# resto del motor; aqui va el literal para no mover el orden del archivo.)
+COLECCIONES_FUERA = ["sesiones", "respaldos"]
 CAMPOS_FUERA = {"usuarios": ["clave"]}
 
 # Colecciones que SI se respaldan pero NUNCA se restauran.
@@ -1061,6 +1329,121 @@ def armar_respaldo(solo_resumen=False):
     if not solo_resumen:
         respaldo["datos"] = datos
     return respaldo
+
+
+# ── ARREGLO 103 · el respaldo se hace SOLO ────────────────────────────────
+#
+# armar_respaldo() existe desde hace tiempo, pero solo cuando alguien se lo
+# pide a mano. Auditado el 07/10: no habia nada programado, asi que lo unico
+# que separaba sus datos de la nada era que se acordara de exportar.
+#
+# LO QUE ESTO CUBRE Y LO QUE NO, que es la mitad importante:
+#
+#   un borrado por error, una fusion que se come algo   SI lo cubre
+#   perder la base entera (la cuenta, el proveedor)     NO lo cubre
+#
+# Una copia DENTRO de la misma base no sobrevive a que se pierda la base. Por
+# eso esto no sustituye a que ella se baje un archivo de vez en cuando: lo que
+# hace es que esa descarga sea de ayer y no de hace tres meses, y que la app
+# pueda decirle cuanto hace que no se baja una.
+COL_RESPALDOS = "respaldos"
+RESPALDOS_QUE_SE_GUARDAN = 14      # dos semanas de copias diarias
+RESPALDO_CADA_HORAS = 23           # se intenta una vez al dia
+_candado_respaldo = threading.Lock()
+
+
+def _clave_dia(momento=None):
+    return (momento or ahora()).strftime("%Y-%m-%d")
+
+
+def hacer_respaldo(forzado=False):
+    """Guarda una copia del dia. Devuelve la clave si la hizo, None si no tocaba.
+
+    Va bajo el MISMO candado que las escrituras del estado: el guardado toca
+    varios documentos, uno por clave, y copiar en medio se llevaria un estado
+    a medio armar —con las remesas nuevas y los saldos viejos—. Es la misma
+    razon por la que GET /estado tambien lo pide.
+    """
+    base = obtener_base()
+    if base is None:
+        return None
+    with _candado_respaldo:
+        clave = _clave_dia()
+        if not forzado and base[COL_RESPALDOS].find_one({"_id": clave}, {"_id": 1}):
+            return None
+        with _candado_estado:
+            copia = armar_respaldo()
+        if not copia:
+            return None
+        base[COL_RESPALDOS].replace_one(
+            {"_id": clave},
+            {
+                "_id": clave,
+                "ts": ahora_ms(),
+                "fecha": ahora().isoformat(),
+                "resumen": copia.get("_respaldo", {}),
+                "datos": copia.get("datos", {}),
+            },
+            upsert=True,
+        )
+        # Podar lo viejo aprovechando que ya estamos escribiendo. Se ordena por
+        # la clave, que es la fecha: no hace falta mirar dentro de cada copia.
+        claves = sorted(
+            [d["_id"] for d in base[COL_RESPALDOS].find({}, {"_id": 1})],
+            reverse=True,
+        )
+        sobran = claves[RESPALDOS_QUE_SE_GUARDAN:]
+        if sobran:
+            base[COL_RESPALDOS].delete_many({"_id": {"$in": sobran}})
+        return clave
+
+
+def estado_respaldos():
+    """Cuantas copias hay y de cuando es la ultima. Lo lee la app."""
+    base = obtener_base()
+    if base is None:
+        return {"ok": False, "error": "base no disponible"}
+    docs = list(base[COL_RESPALDOS].find({}, {"datos": 0}).sort("_id", -1))
+    if not docs:
+        return {"ok": True, "copias": 0, "ultima": None, "guarda": RESPALDOS_QUE_SE_GUARDAN}
+    u = docs[0]
+    return {
+        "ok": True,
+        "copias": len(docs),
+        "guarda": RESPALDOS_QUE_SE_GUARDAN,
+        "ultima": {
+            "dia": u["_id"],
+            "ts": u.get("ts"),
+            "fecha": u.get("fecha"),
+            "registros": (u.get("resumen") or {}).get("total"),
+        },
+        "dias": [d["_id"] for d in docs],
+    }
+
+
+def _ronda_de_respaldo():
+    """Hilo de fondo: lo intenta cada hora y solo hace uno al dia.
+
+    Se mira la hora en vez de dormir 24 h de golpe porque este servidor se
+    reinicia con cada despliegue: durmiendo un dia entero, una semana de
+    despliegues seguidos no dejaria ni una copia.
+    """
+    while True:
+        try:
+            clave = hacer_respaldo()
+            if clave:
+                print("Respaldo automatico guardado: %s" % clave, flush=True)
+        except Exception as e:
+            # Un fallo aqui NO puede tumbar la API: la app tiene que seguir
+            # contestando aunque la copia de hoy no se pueda hacer.
+            print("AVISO: no se pudo hacer el respaldo: %r" % e, flush=True)
+        time.sleep(60 * 60)
+
+
+def arrancar_respaldo_automatico():
+    h = threading.Thread(target=_ronda_de_respaldo, name="respaldo", daemon=True)
+    h.start()
+    return h
 
 
 # Las colecciones que la aplicacion usa de verdad. Un nombre fuera de esta
@@ -1823,6 +2206,18 @@ class Manejador(BaseHTTPRequestHandler):
                 return self._responder(503, {"ok": False, "error": "base no disponible"})
             return self._responder(200, {"ok": True, "entradas": entradas})
 
+        if ruta == "/respaldo/estado":
+            # Cuantas copias automaticas hay y de cuando es la ultima. La app
+            # lo enseña en Configuracion: si nadie lo ve, nadie se entera de
+            # que llevan tres semanas sin hacerse.
+            try:
+                usuario, error = self._admin()
+                if error:
+                    return self._responder(*error)
+                return self._responder(200, estado_respaldos())
+            except PyMongoError:
+                return self._responder(503, {"ok": False, "error": "base no disponible"})
+
         if ruta in ("/respaldo", "/respaldo/resumen"):
             try:
                 usuario, error = self._admin()
@@ -2209,15 +2604,34 @@ class Manejador(BaseHTTPRequestHandler):
                             "error": "todavia no se corrio la carga inicial; usa /estado/importar",
                         })
                     fusionado = fusionar_estado(entrante, guardado, ts_entrante, ts_guardado)
+                    # PASO 3: el permiso decide QUE puede escribir, no solo si
+                    # puede escribir. Lo que esta persona no podia tocar vuelve
+                    # al valor que tenia, y solo se avisa de lo que de verdad
+                    # habria cambiado.
+                    fusionado, rechazadas = aplicar_permisos(fusionado, guardado, yo)
+                    # Va DESPUES de los permisos: lo que no se dejo entrar ya
+                    # volvio a ser lo guardado, asi que no se sella como si
+                    # esta persona lo hubiera tocado.
+                    sellar_quien(fusionado, guardado, yo)
                     ts_nuevo = int(time.time() * 1000)
                     escritas = guardar_estado(fusionado, guardado, ts_nuevo)
             except PyMongoError:
                 return self._responder(503, {"ok": False, "error": "base no disponible"})
+            if rechazadas:
+                # La auditoria del navegador es voluntaria —la escribe la app
+                # si quiere—. Esta no: la escribe el servidor, que es el que
+                # dijo no.
+                try:
+                    anotar_auditoria(yo, "escritura rechazada",
+                                     "sin permiso para: " + ", ".join(rechazadas))
+                except PyMongoError:
+                    pass
             return self._responder(200, {
                 "ok": True,
                 "estado": fusionado,
                 "_ts": ts_nuevo,
                 "clavesEscritas": escritas,
+                "clavesRechazadas": rechazadas,
             })
 
         if len(partes) == 2 and partes[0] == "usuarios":
@@ -2365,6 +2779,14 @@ if __name__ == "__main__":
         # que la API arranque igual: asi /salud sigue sirviendo para
         # diagnosticar en vez de quedar todo caido sin explicacion
         print("AVISO: no se pudo preparar la base: %s" % type(e).__name__, flush=True)
+    # ARREGLO 103: la copia diaria. Va despues de preparar_base() y antes de
+    # escuchar: si la base no esta, el hilo lo dice y lo reintenta a la hora,
+    # pero la API arranca igual.
+    try:
+        arrancar_respaldo_automatico()
+        print("Respaldo automatico en marcha (una copia al dia)", flush=True)
+    except Exception as e:
+        print("AVISO: no arranco el respaldo automatico: %r" % e, flush=True)
     puerto = int(os.environ.get("PORT", "8080"))
     servidor = ThreadingHTTPServer(("0.0.0.0", puerto), Manejador)
     print("API escuchando en el puerto %d" % puerto, flush=True)

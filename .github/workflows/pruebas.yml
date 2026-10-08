@@ -35,3 +35,33 @@ jobs:
       # salio cada numero: si algo no cuadra al desplegar, se ve al momento.
       - name: Lector del mercado P2P
         run: python3 pruebas/mercado.py
+
+      # El respaldo automatico: se le pone una Mongo de mentira delante y se
+      # ejecuta entero. Lo que vigila sobre todo es que la copia no se copie a
+      # si misma — sin eso, la de mañana lleva dentro la de hoy y en una semana
+      # la base no cabe.
+      - name: Respaldo automatico
+        run: python3 pruebas/respaldo.py
+
+      # Paso 3 de la auditoria: que el servidor haga cumplir QUE puede
+      # escribir cada persona. Lo que mas vigila no es lo que se prohibe, es
+      # lo que NO se puede prohibir: registrar una remesa mueve los saldos,
+      # consume lotes del FIFO y crea la fila por cobrar si queda pendiente.
+      # Guardar cualquiera de esas claves le romperia su trabajo al operador,
+      # y en silencio.
+      - name: Permisos de escritura
+        run: python3 pruebas/permisos.py
+
+      # Y el camino de verdad, con el servidor levantado y peticiones HTTP
+      # reales. Una guardia estructural dice que el codigo esta escrito; esto
+      # dice que funciona (la leccion del ARREGLO 91).
+      - name: Permisos de escritura, de punta a punta
+        run: python3 pruebas/permisos_e2e.py
+
+      # El sello de quien registro cada cosa. Lo que mas vigila es lo
+      # contrario de lo que parece: no que se selle, sino que NO se selle de
+      # mas. Un aparato manda su copia ENTERA del estado, con los registros
+      # de todo el mundo; sellar por "viene en el bloque" le pondria el
+      # nombre de quien guarda a las 192 remesas de ella.
+      - name: Quien registro cada cosa
+        run: python3 pruebas/sello.py

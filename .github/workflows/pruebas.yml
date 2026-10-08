@@ -65,3 +65,8 @@ jobs:
       # nombre de quien guarda a las 192 remesas de ella.
       - name: Quien registro cada cosa
         run: python3 pruebas/sello.py
+
+      # "Que ha hecho cada operador". La lista de la auditoria sale toda
+      # mezclada y cortada a las 300 ultimas: esto la agrupa por persona.
+      - name: Que ha hecho cada operador
+        run: python3 pruebas/auditoria.py

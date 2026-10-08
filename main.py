@@ -1247,19 +1247,78 @@ def cuerpo_fecha_local(ms):
         "%d/%m/%Y, %H:%M:%S")
 
 
-def listar_auditoria(role=None, tipo=None, limite=MAX_AUDITORIA):
+def listar_auditoria(role=None, tipo=None, limite=MAX_AUDITORIA, usuario=None):
     base = obtener_base()
     if base is None:
         return None
     filtro = {}
     if role:
         filtro["role"] = role
+    # Por PERSONA, que es la pregunta de verdad: dos personas pueden tener el
+    # mismo rol, y filtrar por rol no contesta "que hizo Carlos".
+    if usuario:
+        filtro["usuario"] = usuario
     if tipo:
         # El front filtra por prefijo: "REMESA" tiene que traer
         # "REMESA_CREADA" y "REMESA_ELIMINADA".
         filtro["accion"] = {"$regex": "^" + _escapar_regex(str(tipo))}
     cursor = base[COL_AUDITORIA].find(filtro, {"_id": 0}).sort("ts", -1).limit(int(limite))
     return list(cursor)
+
+
+# ── Que ha hecho cada persona ────────────────────────────────────────────
+#
+# Sus palabras: "para yo poder saber todas las actividades de cada operador".
+#
+# La lista de la auditoria sale toda mezclada y cortada a las 300 ultimas: no
+# contesta "que ha hecho Carlos este mes". Esto agrupa por persona y cuenta.
+#
+# Se hace en Python y no con una agregacion de Mongo a proposito: son unos
+# miles de documentos a su tamaño, el filtro por ts usa el indice que ya hay,
+# y una agregacion obligaria a que el doble de las pruebas supiera de
+# "$group" — que es justo donde una prueba deja de probar el codigo de verdad.
+DIAS_RESUMEN = 30
+MAX_RESUMEN = 20000
+
+
+def resumen_auditoria(dias=DIAS_RESUMEN):
+    """Cuantas acciones de cada tipo lleva cada persona, y su ultima.
+
+    Devuelve una lista ordenada de mas a menos activa."""
+    base = obtener_base()
+    if base is None:
+        return None
+    try:
+        dias = max(1, min(365, int(dias)))
+    except (TypeError, ValueError):
+        dias = DIAS_RESUMEN
+    desde = int(time.time() * 1000) - dias * 24 * 60 * 60 * 1000
+    cursor = base[COL_AUDITORIA].find(
+        {"ts": {"$gte": desde}},
+        {"_id": 0, "usuario": 1, "role": 1, "accion": 1, "ts": 1, "fecha": 1},
+    ).limit(MAX_RESUMEN)
+    por_persona = {}
+    for e in cursor:
+        quien = e.get("usuario") or "?"
+        d = por_persona.setdefault(quien, {
+            "usuario": quien, "role": e.get("role") or "", "total": 0,
+            "acciones": {}, "ultimaTs": 0, "ultima": "",
+        })
+        d["total"] += 1
+        # La accion, hasta el primer espacio: "REMESA EE.UU" y "REMESA" son
+        # lo mismo para contar, y si no la lista se llena de variantes.
+        clave = (e.get("accion") or "?").split(" ")[0].upper()
+        d["acciones"][clave] = d["acciones"].get(clave, 0) + 1
+        ts = e.get("ts") or 0
+        if ts > d["ultimaTs"]:
+            d["ultimaTs"] = ts
+            d["ultima"] = e.get("fecha") or ""
+            d["role"] = e.get("role") or d["role"]
+    salida = sorted(por_persona.values(), key=lambda x: -x["total"])
+    return {"dias": dias, "personas": salida,
+            # Si se llego al tope, el resumen esta cortado y hay que decirlo:
+            # un numero cortado que parece completo es peor que no darlo.
+            "cortado": sum(p["total"] for p in salida) >= MAX_RESUMEN}
 
 
 def _escapar_regex(t):
@@ -2199,12 +2258,28 @@ class Manejador(BaseHTTPRequestHandler):
                 entradas = listar_auditoria(
                     role=(consulta.get("role") or [""])[0].strip() or None,
                     tipo=(consulta.get("tipo") or [""])[0].strip() or None,
+                    usuario=(consulta.get("usuario") or [""])[0].strip() or None,
                 )
                 if entradas is None:
                     return self._responder(503, {"ok": False, "error": "base no disponible"})
             except PyMongoError:
                 return self._responder(503, {"ok": False, "error": "base no disponible"})
             return self._responder(200, {"ok": True, "entradas": entradas})
+
+        if ruta == "/auditoria/resumen":
+            # Que ha hecho cada persona. Misma puerta que /auditoria: quien
+            # entra a revisar quien toco que, entra a las dos.
+            try:
+                usuario, error = self._sesion()
+                if error:
+                    return self._responder(*error)
+                consulta = parse_qs(urlparse(self.path).query)
+                datos = resumen_auditoria((consulta.get("dias") or [""])[0] or DIAS_RESUMEN)
+                if datos is None:
+                    return self._responder(503, {"ok": False, "error": "base no disponible"})
+            except PyMongoError:
+                return self._responder(503, {"ok": False, "error": "base no disponible"})
+            return self._responder(200, dict({"ok": True}, **datos))
 
         if ruta == "/respaldo/estado":
             # Cuantas copias automaticas hay y de cuando es la ultima. La app

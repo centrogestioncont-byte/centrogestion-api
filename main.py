@@ -566,28 +566,45 @@ def tiene_permiso(usuario, clave):
     return clave in (omision.get("si") or [])
 
 
-def filtrar_por_permisos(entrante, usuario):
-    """Saca del bloque entrante las claves que esta persona no puede tocar.
+def aplicar_permisos(fusionado, guardado, usuario):
+    """Devuelve (estado, rechazadas) despues de deshacer lo que esta persona
+    no podia tocar.
 
-    Devuelve (bloque_filtrado, claves_rechazadas). Quitar una clave es
-    seguro: fusionar_estado hace `if k not in entrante: continue`, o sea que
-    una clave que no llega se conserva TAL CUAL como estaba guardada. No se
-    borra nada; simplemente lo que mando esa persona no cuenta.
+    Va DESPUES de fusionar, y no antes, por una razon que se vio en la
+    primera prueba real: la app manda el bloque ENTERO en cada guardado, con
+    las 36 claves, haya cambiado algo o no. Filtrando por "esta la clave en
+    el bloque" se rechazaban las 14 guardadas en CADA guardado, y al operador
+    le salia un aviso de 14 lineas sin haber intentado tocar nada. Un aviso
+    permanente que no significa nada es lo que ensena a no leer los avisos, y
+    en esta app los avisos cuestan dinero.
 
-    Ojo: esto no es un aviso cosmetico. Si alguien escribio algo que no le
-    tocaba, el aparato lo nota solo —adopta lo que contesta el servidor y el
-    aviso de choque (ARREGLO 67) compara lo que mando contra lo que quedo—
-    pero ademas se anota en la auditoria del servidor, que es la unica que no
-    depende de que el navegador quiera anotarla.
+    Lo que se mira ahora es si permitirlo habria CAMBIADO lo guardado. Cada
+    clave se fusiona por su cuenta dentro de fusionar_estado —el bucle de
+    DATA_KEYS no cruza una clave con otra— asi que devolver una al valor que
+    tenia es exactamente lo mismo que no haberla dejado entrar, y ademas se
+    puede comparar contra lo que habia.
     """
-    if not isinstance(entrante, dict):
-        return entrante, []
-    rechazadas = [k for k, permiso in CLAVES_GUARDADAS.items()
-                  if k in entrante and not tiene_permiso(usuario, permiso)]
-    if not rechazadas:
-        return entrante, []
-    limpio = {k: v for k, v in entrante.items() if k not in rechazadas}
-    return limpio, sorted(rechazadas)
+    rechazadas = []
+    if not isinstance(fusionado, dict):
+        return fusionado, rechazadas
+    guardado = guardado or {}
+    for clave, permiso in CLAVES_GUARDADAS.items():
+        if clave not in fusionado or tiene_permiso(usuario, permiso):
+            continue
+        antes = guardado.get(clave)
+        # La misma comparacion que usa guardar_estado para decidir si una
+        # clave cambio de verdad.
+        iguales = (clave in guardado and
+                   json.dumps(antes, ensure_ascii=False, sort_keys=True, default=str) ==
+                   json.dumps(fusionado.get(clave), ensure_ascii=False,
+                              sort_keys=True, default=str))
+        if clave in guardado:
+            fusionado[clave] = antes
+        else:
+            del fusionado[clave]
+        if not iguales:
+            rechazadas.append(clave)
+    return fusionado, sorted(rechazadas)
 
 
 # ── Equivalencias exactas con JavaScript ─────────────────────────────────
@@ -2465,12 +2482,6 @@ class Manejador(BaseHTTPRequestHandler):
                 if not isinstance(cuerpo, dict) or not isinstance(cuerpo.get("estado"), dict):
                     return self._responder(400, {"ok": False, "error": "falta el estado"})
                 entrante = cuerpo["estado"]
-                # PASO 3: el permiso decide QUE puede escribir, no solo si
-                # puede escribir. Lo que esta persona no puede tocar se saca
-                # del bloque antes de fusionar; fusionar_estado conserva tal
-                # cual cualquier clave que no llegue, asi que no se borra
-                # nada: lo que mando simplemente no cuenta.
-                entrante, rechazadas = filtrar_por_permisos(entrante, yo)
                 ts_entrante = cuerpo.get("_ts")
                 if not _es_numero(ts_entrante):
                     ts_entrante = 0
@@ -2492,6 +2503,11 @@ class Manejador(BaseHTTPRequestHandler):
                             "error": "todavia no se corrio la carga inicial; usa /estado/importar",
                         })
                     fusionado = fusionar_estado(entrante, guardado, ts_entrante, ts_guardado)
+                    # PASO 3: el permiso decide QUE puede escribir, no solo si
+                    # puede escribir. Lo que esta persona no podia tocar vuelve
+                    # al valor que tenia, y solo se avisa de lo que de verdad
+                    # habria cambiado.
+                    fusionado, rechazadas = aplicar_permisos(fusionado, guardado, yo)
                     ts_nuevo = int(time.time() * 1000)
                     escritas = guardar_estado(fusionado, guardado, ts_nuevo)
             except PyMongoError:

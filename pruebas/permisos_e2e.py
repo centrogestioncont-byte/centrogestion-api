@@ -124,15 +124,34 @@ def ok(c, m, x=""):
     print(("  ok   " if c else "  FALLA ") + m + ("" if c else "  -> " + str(x)))
     if not c: fallos.append(m)
 
+# Cada registro cambiado lleva su marca _mod, que es lo que manda la app de
+# verdad (_marcarTodoLoQueSeFusiona) y lo que decide la fusion. Sin marca, el
+# reloj del bloque es lo unico que queda y el resultado depende de en que
+# orden corrieron las pruebas — que es como se colo un falso verde aqui.
+AHORA = 9999999999999
 VENENO = {
-    "brl": [{"_uid": "r1", "cliente": "JUAN", "pr": 1.5}],
-    "cuentas": [{"id": "c1", "nombre": "BDV", "saldo": 900}],
-    "prestamos": [{"id": 9, "monto": 0, "cliente": "BORRADO", "_mod": 9999999999999}],
-    "egresos": [{"id": 8, "motivo": "ROBADO", "monto": 99999, "_mod": 9999999999999}],
+    "brl": [{"_uid": "r1", "cliente": "JUAN", "pr": 1.5, "_mod": AHORA}],
+    "cuentas": [{"id": "c1", "nombre": "BDV", "saldo": 900, "_mod": AHORA}],
+    "prestamos": [{"id": 9, "monto": 0, "cliente": "BORRADO", "_mod": AHORA}],
+    "egresos": [{"id": 8, "motivo": "ROBADO", "monto": 99999, "_mod": AHORA}],
     "config": {"pct_sueldo": 99, "aperturaUsdt": 0.01},
+    "_modCampos": {"config": {"pct_sueldo": AHORA, "aperturaUsdt": AHORA}},
 }
 
-print("== El operador guarda su remesa y, de paso, intenta tocar todo ==")
+# EL CASO DE VERDAD, el que se vio con su primer operador el 08/10: la app
+# manda el bloque ENTERO en cada guardado, con las 36 claves, haya cambiado
+# algo o no. Rechazando por "esta la clave en el bloque" salian las 14
+# guardadas de golpe y el operador veia un aviso de 14 lineas sin haber
+# intentado tocar nada.
+print("== El operador manda el bloque entero sin tocar nada ==")
+EL_ESTADO_TAL_CUAL = get("T-OP")["estado"]
+cod, d = put("T-OP", EL_ESTADO_TAL_CUAL, ts=1500)
+ok(cod == 200, "guarda bien", cod)
+ok((d.get("clavesRechazadas") or []) == [],
+   "y NO se le avisa de nada: no intento cambiar nada",
+   d.get("clavesRechazadas"))
+
+print("\n== El operador guarda su remesa y, de paso, intenta tocar todo ==")
 cod, d = put("T-OP", VENENO)
 ok(cod == 200, "el guardado sale bien (su remesa SI tiene que entrar)", cod)
 ok(sorted(d.get("clavesRechazadas") or []) == ["config", "egresos", "prestamos"],

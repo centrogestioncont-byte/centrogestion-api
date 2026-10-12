@@ -70,3 +70,22 @@ jobs:
       # mezclada y cortada a las 300 ultimas: esto la agrupa por persona.
       - name: Que ha hecho cada operador
         run: python3 pruebas/auditoria.py
+
+      # La notificacion al telefono. La ENTREGA no se puede probar aqui —hace
+      # falta un servicio de push de verdad— asi que el envio se sustituye por
+      # una funcion que anota lo que recibe. Lo que si se prueba es todo lo que
+      # decide SI se manda, A QUIEN y CUANTAS veces: sonar todos los dias,
+      # sonar de madrugada o mandar un numero de hace tres dias son los fallos
+      # que cuestan, y los tres se ven desde aqui.
+      # cryptography se instala SOLO para esta prueba: es la que genera el
+      # par de claves VAPID, y sin ella la prueba se salta ese trozo diciendolo.
+      # En produccion llega sola, como dependencia de pywebpush.
+      - name: La notificacion al telefono
+        env:
+          # Aqui cryptography SI esta, asi que saltarse la generacion de
+          # claves es un fallo. Sin esto, un salto salia en verde y el
+          # "success" del CI no probaba que se hubiera ejecutado nunca.
+          PUSH_EXIGE_CRYPTO: "1"
+        run: |
+          python3 -m pip install --quiet cryptography
+          python3 pruebas/push.py

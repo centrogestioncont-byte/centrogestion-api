@@ -190,6 +190,36 @@ ok(len(BASE[M.COL_PUSH].docs) == 0,
    len(BASE[M.COL_PUSH].docs))
 M._enviar_uno = _falso_enviar
 
+print("\n── ARREGLO 115 · el aviso que sale AL MOMENTO")
+# Sustituye a ntfy. Va por su propia puerta y no por la ronda de la hora,
+# porque su valor es que llegue YA: sirve para que el OTRO aparato se entere
+# de lo que acaba de registrar este.
+BASE.c[M.COL_PUSH] = Col()
+suscribir("https://fcm.test/tel")
+suscribir("https://fcm.test/pc")
+MANDADOS.clear()
+n = M.mandar_aviso_ahora({"titulo": "Remesa registrada", "texto": "BRL\u2194VES \u00b7 $0,59 USDT"})
+ok(n == 2 and len(MANDADOS) == 2, "sale a los dos aparatos", n)
+# Excluir al que lo manda no es un detalle: recibir en la misma pantalla la
+# notificacion de lo que acabas de escribir es ruido.
+MANDADOS.clear()
+n = M.mandar_aviso_ahora({"titulo": "Remesa registrada", "texto": "x"}, "https://fcm.test/tel")
+ok(n == 1 and MANDADOS[0]["a"] == "https://fcm.test/pc",
+   "y NO le vuelve al aparato que la registro", [m["a"] for m in MANDADOS])
+# Sin hora de silencio, a diferencia de la ronda: esto es el eco de algo que
+# alguien acaba de hacer, no una alarma que suena sola de madrugada.
+import inspect as _i
+ok("es_hora_de_molestar" not in _i.getsource(M.mandar_aviso_ahora),
+   "no mira la hora: es el eco de algo que acaban de hacer, no una alarma")
+# Y la clave NO se apunta: dos remesas seguidas son dos avisos, no uno.
+ok("ultimaClave" not in _i.getsource(M.mandar_aviso_ahora),
+   "ni se apunta la clave: dos remesas seguidas son dos avisos");
+MANDADOS.clear()
+guardadas2 = M.push_configurado
+M.push_configurado = lambda: False
+ok(M.mandar_aviso_ahora({"titulo": "x"}) == 0, "y sin claves VAPID no manda nada")
+M.push_configurado = guardadas2
+
 print("\n── Lo que no puede viajar en el respaldo")
 ok("push_suscripciones" in M.COLECCIONES_FUERA,
    "las suscripciones quedan FUERA del respaldo: son credenciales de un aparato")

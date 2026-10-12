@@ -93,6 +93,15 @@ except BaseException as _e:
     # que NO es una Exception. Con el except estrecho, esto reventaba.
     HAY_CRYPTO = False
     print("  SALTADO  la generacion de claves: cryptography no se puede usar aqui (%s)" % type(_e).__name__)
+    # En el CI esto NO se puede saltar. El workflow pone PUSH_EXIGE_CRYPTO=1
+    # justo despues de instalar cryptography: sin esta linea, un salto salia
+    # en verde igual que una prueba pasada, asi que el "success" del CI no
+    # probaba que la generacion se hubiera ejecutado nunca. Es el mismo
+    # agujero que una guardia que pasa con el fallo puesto, un piso mas
+    # arriba.
+    if os.environ.get("PUSH_EXIGE_CRYPTO") == "1":
+        print("\nFALLA: aqui cryptography TIENE que funcionar y no funciona.")
+        sys.exit(1)
 
 ok(not M.VAPID_PUBLICA and not M.VAPID_PRIVADA, "al arrancar no hay ninguna")
 if HAY_CRYPTO:

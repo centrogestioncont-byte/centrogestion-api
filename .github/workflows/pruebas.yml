@@ -81,6 +81,11 @@ jobs:
       # par de claves VAPID, y sin ella la prueba se salta ese trozo diciendolo.
       # En produccion llega sola, como dependencia de pywebpush.
       - name: La notificacion al telefono
+        env:
+          # Aqui cryptography SI esta, asi que saltarse la generacion de
+          # claves es un fallo. Sin esto, un salto salia en verde y el
+          # "success" del CI no probaba que se hubiera ejecutado nunca.
+          PUSH_EXIGE_CRYPTO: "1"
         run: |
           python3 -m pip install --quiet cryptography
           python3 pruebas/push.py

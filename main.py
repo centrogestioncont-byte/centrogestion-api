@@ -1337,7 +1337,10 @@ def _escapar_regex(t):
 # llevaria dentro las trece anteriores, la de mañana esas catorce otra vez, y
 # en una semana la base no cabe. (COL_RESPALDOS se define mas abajo, con el
 # resto del motor; aqui va el literal para no mover el orden del archivo.)
-COLECCIONES_FUERA = ["sesiones", "respaldos"]
+# ARREGLO 114: las suscripciones de push son credenciales de un aparato,
+# igual que las sesiones. El respaldo se baja al telefono y se sube a la
+# nube: no tienen por que viajar ahi.
+COLECCIONES_FUERA = ["sesiones", "respaldos", "push_suscripciones"]
 CAMPOS_FUERA = {"usuarios": ["clave"]}
 
 # Colecciones que SI se respaldan pero NUNCA se restauran.
@@ -1501,6 +1504,181 @@ def _ronda_de_respaldo():
 
 def arrancar_respaldo_automatico():
     h = threading.Thread(target=_ronda_de_respaldo, name="respaldo", daemon=True)
+    h.start()
+    return h
+
+
+# ── ARREGLO 114 · la notificacion al telefono ────────────────────────────
+#
+# Sus palabras del 11/10: "quiero que esta notificacion me llegue al telefono
+# no solo cuando yo abra la app". Un aviso dentro de la app solo existe
+# cuando ella la abre; esto lo saca al bolsillo.
+#
+# ── QUIEN DECIDE EL AVISO, que es lo que no hay que deshacer ──
+# El servidor NO calcula nada. El suelo sale de sus lotes y esa cuenta vive
+# en index.html; escribirla aqui tambien daria DOS suelos —el de la pantalla
+# y el de la notificacion— que un dia dirian cosas distintas. Seria el 34,27
+# contra 34,28 de Por cobrar, pero en un numero con el que ella publica.
+#
+# Asi que la app deja escrito el aviso ya hecho —titulo, texto y clave— en
+# una clave mas del estado, y aqui solo se reparte. Un relevo, no una
+# segunda opinion.
+#
+# ── LA CLAVE es lo que evita que suene todos los dias ──
+# Lleva los numeros redondeados: mientras la situacion siga siendo la misma,
+# es el mismo aviso y no se vuelve a mandar. Se apunta en CADA suscripcion,
+# no en el estado, porque dos aparatos pueden estar en puntos distintos —uno
+# recien suscrito no tiene por que perderse el aviso que el otro ya recibio.
+COL_PUSH = "push_suscripciones"
+PUSH_CADA_SEG = 60 * 60
+# Un aviso de hace tres dias ya no es accionable: la tasa de hoy es otra. Si
+# la app lleva tanto sin guardar, lo que toca es abrirla, no sonar.
+AVISO_VIGENCIA_HORAS = 36
+# Nada entre las diez de la noche y las siete de la manana. Una alarma que la
+# despierta se apaga para siempre, y estas valen dinero.
+PUSH_HORA_DESDE = 7
+PUSH_HORA_HASTA = 22
+ZONA_CARACAS = timezone(timedelta(hours=-4))
+
+VAPID_PUBLICA = os.environ.get("VAPID_PUBLICA", "").strip()
+VAPID_PRIVADA = os.environ.get("VAPID_PRIVADA", "").strip()
+# El "sub" de VAPID viaja al servicio de push de Google. Por omision va la
+# direccion de la app, no un correo: no hay por que mandarle el suyo a nadie.
+VAPID_CONTACTO = os.environ.get(
+    "VAPID_CONTACTO", "https://centrogestion.pages.dev").strip()
+
+
+def push_configurado():
+    return bool(VAPID_PUBLICA and VAPID_PRIVADA)
+
+
+def guardar_suscripcion(usuario, sus):
+    """Una fila por aparato. El endpoint es el identificador que da el
+    navegador, asi que sirve de _id: volver a suscribir el mismo telefono
+    actualiza, no duplica."""
+    base = obtener_base()
+    if base is None:
+        return False
+    punto = str((sus or {}).get("endpoint", "")).strip()
+    claves = (sus or {}).get("keys") or {}
+    if not punto.startswith("https://") or not claves.get("p256dh") or not claves.get("auth"):
+        return False
+    base[COL_PUSH].replace_one(
+        {"_id": punto},
+        {"_id": punto, "keys": {"p256dh": str(claves["p256dh"]), "auth": str(claves["auth"])},
+         "usuario": str(usuario.get("correo", "") if isinstance(usuario, dict) else usuario or ""),
+         "alta": ahora().isoformat(), "ultimaClave": "", "ultimoEnvio": ""},
+        upsert=True)
+    return True
+
+
+def olvidar_suscripcion(punto):
+    base = obtener_base()
+    if base is None:
+        return False
+    base[COL_PUSH].delete_one({"_id": str(punto or "")})
+    return True
+
+
+def _aviso_guardado():
+    """Lo que la app dejo escrito. En COL_ESTADO cada clave es un documento:
+    {"_id": "avisoPush", "v": {...}}."""
+    base = obtener_base()
+    if base is None:
+        return None
+    doc = base[COL_ESTADO].find_one({"_id": "avisoPush"})
+    v = (doc or {}).get("v")
+    if not isinstance(v, dict):
+        return None
+    clave = str(v.get("clave", "")).strip()
+    titulo = str(v.get("titulo", "")).strip()
+    if not clave or not titulo:
+        return None
+    # Vencido: la app lleva demasiado sin guardar y el aviso puede ser de una
+    # tasa que ya cambio. Mejor callar que sonar con un numero viejo.
+    ts = v.get("ts")
+    try:
+        edad_h = (ahora().timestamp() - float(ts) / 1000.0) / 3600.0
+    except (TypeError, ValueError):
+        return None
+    if edad_h > AVISO_VIGENCIA_HORAS or edad_h < -1:
+        return None
+    return {"clave": clave, "titulo": titulo,
+            "texto": str(v.get("texto", "")).strip(), "nivel": str(v.get("nivel", ""))}
+
+
+def es_hora_de_molestar(momento=None):
+    h = (momento or ahora()).astimezone(ZONA_CARACAS).hour
+    return PUSH_HORA_DESDE <= h < PUSH_HORA_HASTA
+
+
+def _enviar_uno(sus, carga):
+    """Devuelve (ok, hay_que_borrarla). El contenido va CIFRADO de extremo a
+    extremo por el propio protocolo: Google transporta algo que no puede
+    leer. Por eso el texto del aviso puede ir dentro."""
+    from pywebpush import webpush, WebPushException
+    try:
+        webpush(
+            subscription_info={"endpoint": sus["_id"], "keys": sus.get("keys") or {}},
+            data=json.dumps(carga, ensure_ascii=False),
+            vapid_private_key=VAPID_PRIVADA,
+            vapid_claims={"sub": VAPID_CONTACTO},
+            timeout=10)
+        return True, False
+    except WebPushException as e:
+        codigo = getattr(getattr(e, "response", None), "status_code", 0)
+        # 404/410: ese aparato ya no existe —desinstalo la app, limpio los
+        # datos—. Dejarla ahi es reintentar cada hora contra la nada.
+        return False, codigo in (404, 410)
+
+
+def hacer_ronda_push(forzado=False):
+    """Manda el aviso guardado a cada aparato que no lo haya recibido ya.
+    Devuelve cuantos salieron."""
+    if not push_configurado():
+        return 0
+    base = obtener_base()
+    if base is None:
+        return 0
+    if not forzado and not es_hora_de_molestar():
+        return 0
+    aviso = _aviso_guardado()
+    if not aviso:
+        return 0
+    carga = {"titulo": aviso["titulo"], "texto": aviso["texto"],
+             "clave": aviso["clave"], "nivel": aviso["nivel"]}
+    enviados = 0
+    for sus in list(base[COL_PUSH].find({})):
+        if sus.get("ultimaClave") == aviso["clave"]:
+            continue
+        ok, borrar = _enviar_uno(sus, carga)
+        if borrar:
+            base[COL_PUSH].delete_one({"_id": sus["_id"]})
+            continue
+        if ok:
+            base[COL_PUSH].update_one(
+                {"_id": sus["_id"]},
+                {"$set": {"ultimaClave": aviso["clave"], "ultimoEnvio": ahora().isoformat()}})
+            enviados += 1
+    return enviados
+
+
+def _ronda_de_push():
+    """Igual que el respaldo: se mira cada hora en vez de dormir de golpe,
+    porque este servidor se reinicia con cada despliegue."""
+    while True:
+        try:
+            n = hacer_ronda_push()
+            if n:
+                print("Aviso mandado a %d aparato(s)" % n, flush=True)
+        except Exception as e:
+            # Un fallo aqui NO puede tumbar la API.
+            print("AVISO: no se pudo mandar la notificacion: %r" % e, flush=True)
+        time.sleep(PUSH_CADA_SEG)
+
+
+def arrancar_push_automatico():
+    h = threading.Thread(target=_ronda_de_push, name="push", daemon=True)
     h.start()
     return h
 
@@ -2189,6 +2367,19 @@ class Manejador(BaseHTTPRequestHandler):
             except PyMongoError:
                 return self._responder(503, {"ok": False, "error": "base no disponible"})
 
+        # ARREGLO 114: la clave publica de VAPID. Es publica a proposito —el
+        # navegador la necesita para suscribirse— pero va detras de sesion
+        # para no publicar de gratis que este servidor manda notificaciones.
+        if ruta == "/push/clave":
+            usuario, error = self._sesion_sin_base()
+            if error:
+                return self._responder(*error)
+            return self._responder(200, {
+                "ok": True,
+                "configurado": push_configurado(),
+                "clave": VAPID_PUBLICA if push_configurado() else "",
+            })
+
         if ruta == "/clientes":
             try:
                 usuario, error = self._sesion()
@@ -2324,6 +2515,30 @@ class Manejador(BaseHTTPRequestHandler):
         ruta = self.path.split("?")[0].rstrip("/") or "/"
         cuerpo = self._leer_json(
             CUERPO_MAXIMO_ESTADO if ruta == "/estado/importar" else CUERPO_MAXIMO)
+
+        # ARREGLO 114: el alta y la baja del aparato.
+        if ruta == "/push/suscribir":
+            usuario, error = self._sesion()
+            if error:
+                return self._responder(*error)
+            if not push_configurado():
+                return self._responder(503, {
+                    "ok": False,
+                    "error": "este servidor no tiene configuradas las claves VAPID",
+                })
+            if not isinstance(cuerpo, dict) or not guardar_suscripcion(usuario, cuerpo):
+                return self._responder(400, {"ok": False, "error": "suscripcion incompleta"})
+            return self._responder(200, {"ok": True})
+
+        if ruta == "/push/olvidar":
+            usuario, error = self._sesion()
+            if error:
+                return self._responder(*error)
+            punto = str((cuerpo or {}).get("endpoint", "")).strip() if isinstance(cuerpo, dict) else ""
+            if not punto:
+                return self._responder(400, {"ok": False, "error": "falta el endpoint"})
+            olvidar_suscripcion(punto)
+            return self._responder(200, {"ok": True})
 
         if ruta == "/auth/entrar":
             if not isinstance(cuerpo, dict):
@@ -2859,6 +3074,7 @@ if __name__ == "__main__":
     # pero la API arranca igual.
     try:
         arrancar_respaldo_automatico()
+        arrancar_push_automatico()
         print("Respaldo automatico en marcha (una copia al dia)", flush=True)
     except Exception as e:
         print("AVISO: no arranco el respaldo automatico: %r" % e, flush=True)

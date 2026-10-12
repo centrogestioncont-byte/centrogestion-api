@@ -1742,6 +1742,42 @@ def hacer_ronda_push(forzado=False):
     return enviados
 
 
+# ── ARREGLO 115 · el aviso que sale AL MOMENTO ───────────────────────────
+# Esto sustituye a ntfy, que avisaba al registrar una remesa. Su canal era
+# publico por diseno —cualquiera que supiera el nombre leia el cliente y la
+# ganancia de cada remesa— y ademas eran DOS sistemas de notificacion uno al
+# lado del otro, que es el ARREGLO 98 otra vez.
+#
+# Va por su propia puerta y no por la ronda de la hora, porque el valor de
+# este aviso es que llegue YA: sirve para que el otro aparato se entere de lo
+# que acaba de registrar este. Con una hora de retraso no avisa de nada.
+def mandar_aviso_ahora(carga, excluir=""):
+    """Manda un aviso a todos los aparatos MENOS al que lo pidio.
+
+    Excluir al que lo manda no es un detalle: ella registra desde el telefono
+    o desde la PC, y recibir en la misma pantalla la notificacion de lo que
+    acabas de escribir es ruido. Lo que hace falta es que se entere el OTRO.
+
+    Sin hora de silencio, a diferencia de la ronda: esto es el eco de algo que
+    alguien acaba de hacer, no una alarma que suena sola de madrugada.
+    """
+    if not push_configurado():
+        return 0
+    base = obtener_base()
+    if base is None:
+        return 0
+    enviados = 0
+    for sus in list(base[COL_PUSH].find({})):
+        if excluir and sus.get("_id") == excluir:
+            continue
+        ok, borrar = _enviar_uno(sus, carga)
+        if borrar:
+            base[COL_PUSH].delete_one({"_id": sus["_id"]})
+        elif ok:
+            enviados += 1
+    return enviados
+
+
 def _ronda_de_push():
     """Igual que el respaldo: se mira cada hora en vez de dormir de golpe,
     porque este servidor se reinicia con cada despliegue."""
@@ -2608,6 +2644,24 @@ class Manejador(BaseHTTPRequestHandler):
             if not isinstance(cuerpo, dict) or not guardar_suscripcion(usuario, cuerpo):
                 return self._responder(400, {"ok": False, "error": "suscripcion incompleta"})
             return self._responder(200, {"ok": True})
+
+        if ruta == "/push/ahora":
+            usuario, error = self._sesion()
+            if error:
+                return self._responder(*error)
+            if not isinstance(cuerpo, dict):
+                return self._responder(400, {"ok": False, "error": "faltan datos"})
+            titulo = str(cuerpo.get("titulo", "")).strip()[:120]
+            if not titulo:
+                return self._responder(400, {"ok": False, "error": "falta el titulo"})
+            carga = {
+                "titulo": titulo,
+                "texto": str(cuerpo.get("texto", "")).strip()[:400],
+                "clave": str(cuerpo.get("clave", "")).strip()[:80],
+                "nivel": "info",
+            }
+            n = mandar_aviso_ahora(carga, str(cuerpo.get("excluir", "")).strip())
+            return self._responder(200, {"ok": True, "enviados": n})
 
         if ruta == "/push/olvidar":
             usuario, error = self._sesion()

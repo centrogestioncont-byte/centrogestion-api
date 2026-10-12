@@ -21,6 +21,7 @@
 
 import hashlib
 import hmac
+import base64
 import json
 import os
 import secrets
@@ -1340,7 +1341,7 @@ def _escapar_regex(t):
 # ARREGLO 114: las suscripciones de push son credenciales de un aparato,
 # igual que las sesiones. El respaldo se baja al telefono y se sube a la
 # nube: no tienen por que viajar ahi.
-COLECCIONES_FUERA = ["sesiones", "respaldos", "push_suscripciones"]
+COLECCIONES_FUERA = ["sesiones", "respaldos", "push_suscripciones", "claves"]
 CAMPOS_FUERA = {"usuarios": ["clave"]}
 
 # Colecciones que SI se respaldan pero NUNCA se restauran.
@@ -1540,8 +1541,86 @@ PUSH_HORA_DESDE = 7
 PUSH_HORA_HASTA = 22
 ZONA_CARACAS = timezone(timedelta(hours=-4))
 
+# ── Las claves VAPID se las hace el servidor solo ──
+# Lo normal seria pedirlas en dos variables de entorno, y si estan puestas
+# mandan. Pero generarlas hace falta un ordenador con herramientas, y ella
+# trabaja desde el telefono: un arreglo que depende de que consiga una PC es
+# un arreglo que no llega. Asi que si no estan, se hacen una vez y se guardan
+# en su propia base, al lado de todo lo demas.
+#
+# Lo que puede hacer quien tenga esta clave privada es mandarle
+# notificaciones a los aparatos suscritos a SU clave publica. No abre la
+# base, no lee el estado y no entra a la sesion. Por eso vivir en Mongo es
+# suficiente; y si algun dia quiere cambiarlas, pone las variables de
+# entorno y esas ganan.
+COL_CLAVES = "claves"
+_vapid_candado = threading.Lock()
 VAPID_PUBLICA = os.environ.get("VAPID_PUBLICA", "").strip()
 VAPID_PRIVADA = os.environ.get("VAPID_PRIVADA", "").strip()
+
+
+def _b64u(b):
+    return base64.urlsafe_b64encode(b).rstrip(b"=").decode("ascii")
+
+
+def _hacer_par_vapid():
+    """Un par P-256. La publica va en el formato crudo de 65 bytes que el
+    navegador espera en applicationServerKey; la privada, en PEM, que es lo
+    que lee pywebpush."""
+    from cryptography.hazmat.primitives.asymmetric import ec
+    from cryptography.hazmat.primitives import serialization
+    k = ec.generate_private_key(ec.SECP256R1())
+    cruda = k.public_key().public_bytes(
+        serialization.Encoding.X962,
+        serialization.PublicFormat.UncompressedPoint)
+    pem = k.private_bytes(
+        serialization.Encoding.PEM,
+        serialization.PrivateFormat.PKCS8,
+        serialization.NoEncryption()).decode("ascii")
+    return _b64u(cruda), pem
+
+
+def asegurar_vapid():
+    """Deja VAPID_PUBLICA y VAPID_PRIVADA listas. Las de entorno mandan; si no
+    hay, se leen de la base, y si tampoco, se hacen una vez.
+
+    Va bajo candado porque arranca desde el hilo del push y desde la primera
+    peticion: sin el, dos caminos a la vez harian dos pares y el aparato
+    quedaria suscrito a una clave con la que el servidor ya no firma — se
+    suscribe bien y no le llega nada, sin un solo error.
+    """
+    global VAPID_PUBLICA, VAPID_PRIVADA
+    if VAPID_PUBLICA and VAPID_PRIVADA:
+        return True
+    base = obtener_base()
+    if base is None:
+        return False
+    with _vapid_candado:
+        if VAPID_PUBLICA and VAPID_PRIVADA:
+            return True
+        doc = base[COL_CLAVES].find_one({"_id": "vapid"})
+        if doc and doc.get("publica") and doc.get("privada"):
+            VAPID_PUBLICA, VAPID_PRIVADA = doc["publica"], doc["privada"]
+            return True
+        try:
+            pub, priv = _hacer_par_vapid()
+        except BaseException as e:
+            # BaseException y no Exception: si las bindings de Rust de
+            # cryptography no cargan, lo que sale es un PanicException, que
+            # no es una Exception. Con el except estrecho, no poder generar
+            # las claves tumbaria la peticion en vez de dejar el push
+            # apagado — y el push es lo de menos al lado de que la app
+            # pueda guardar.
+            print("AVISO: no se pudieron generar las claves VAPID: %r" % e, flush=True)
+            return False
+        base[COL_CLAVES].replace_one(
+            {"_id": "vapid"},
+            {"_id": "vapid", "publica": pub, "privada": priv,
+             "creadas": ahora().isoformat()},
+            upsert=True)
+        VAPID_PUBLICA, VAPID_PRIVADA = pub, priv
+        print("Claves VAPID creadas y guardadas en la base", flush=True)
+        return True
 # El "sub" de VAPID viaja al servicio de push de Google. Por omision va la
 # direccion de la app, no un correo: no hay por que mandarle el suyo a nadie.
 VAPID_CONTACTO = os.environ.get(
@@ -1549,7 +1628,7 @@ VAPID_CONTACTO = os.environ.get(
 
 
 def push_configurado():
-    return bool(VAPID_PUBLICA and VAPID_PRIVADA)
+    return asegurar_vapid()
 
 
 def guardar_suscripcion(usuario, sus):

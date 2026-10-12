@@ -77,5 +77,10 @@ jobs:
       # decide SI se manda, A QUIEN y CUANTAS veces: sonar todos los dias,
       # sonar de madrugada o mandar un numero de hace tres dias son los fallos
       # que cuestan, y los tres se ven desde aqui.
+      # cryptography se instala SOLO para esta prueba: es la que genera el
+      # par de claves VAPID, y sin ella la prueba se salta ese trozo diciendolo.
+      # En produccion llega sola, como dependencia de pywebpush.
       - name: La notificacion al telefono
-        run: python3 pruebas/push.py
+        run: |
+          python3 -m pip install --quiet cryptography
+          python3 pruebas/push.py

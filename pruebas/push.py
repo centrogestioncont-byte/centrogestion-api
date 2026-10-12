@@ -13,8 +13,9 @@ from datetime import datetime, timedelta, timezone
 
 RAIZ = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, RAIZ)
-os.environ.setdefault("VAPID_PUBLICA", "pub-de-mentira")
-os.environ.setdefault("VAPID_PRIVADA", "priv-de-mentira")
+# A proposito SIN variables de entorno: lo primero que se prueba es que el
+# servidor se hace las claves solo. Ella trabaja desde el telefono y un
+# arreglo que depende de que consiga una PC es un arreglo que no llega.
 
 import types
 if "pymongo" not in sys.modules:
@@ -78,7 +79,47 @@ def suscribir(punto):
     M.guardar_suscripcion({"correo": "ella@ejemplo.com"},
         {"endpoint": punto, "keys": {"p256dh": "pp", "auth": "aa"}})
 
-print("── El alta del aparato")
+print("── Las claves se las hace el servidor solo")
+# cryptography hace falta para generarlas. En el CI se instala, asi que esto
+# se ejecuta de verdad; en un entorno sin ella se dice y se sigue, en vez de
+# fingir que paso. Un "ok" que no ejecuto nada es peor que un salto dicho.
+try:
+    from cryptography.hazmat.primitives.asymmetric import ec as _ec
+    _ec.generate_private_key(_ec.SECP256R1())
+    HAY_CRYPTO = True
+except BaseException as _e:
+    # BaseException y no Exception: cuando las bindings de Rust de
+    # cryptography no cargan, lo que sale es un pyo3_runtime.PanicException,
+    # que NO es una Exception. Con el except estrecho, esto reventaba.
+    HAY_CRYPTO = False
+    print("  SALTADO  la generacion de claves: cryptography no se puede usar aqui (%s)" % type(_e).__name__)
+
+ok(not M.VAPID_PUBLICA and not M.VAPID_PRIVADA, "al arrancar no hay ninguna")
+if HAY_CRYPTO:
+    ok(M.asegurar_vapid(), "y se generan a la primera")
+if HAY_CRYPTO:
+  pub1, priv1 = M.VAPID_PUBLICA, M.VAPID_PRIVADA
+  # La publica va cruda de 65 bytes, que es lo que el navegador espera en
+  # applicationServerKey: en base64url son 87 caracteres y empieza por "B".
+  import base64 as _b64
+  crudo = _b64.urlsafe_b64decode(pub1 + "=" * ((4 - len(pub1) % 4) % 4))
+  ok(len(crudo) == 65 and crudo[0] == 4,
+     "la publica son los 65 bytes crudos que pide el navegador", len(crudo))
+  ok("BEGIN PRIVATE KEY" in priv1, "y la privada va en PEM, que es lo que lee pywebpush")
+  # Dos llamadas no pueden dar dos pares: el aparato quedaria suscrito a una
+  # clave con la que el servidor ya no firma, y no le llegaria nada sin un solo
+  # error. Se simula el reinicio: se olvidan las de memoria y se vuelven a pedir.
+  M.VAPID_PUBLICA = ""; M.VAPID_PRIVADA = ""
+  M.asegurar_vapid()
+  ok(M.VAPID_PUBLICA == pub1 and M.VAPID_PRIVADA == priv1,
+     "tras un reinicio se leen de la base, NO se hacen otras")
+ok("claves" in M.COLECCIONES_FUERA, "y la clave privada no viaja en el respaldo")
+if not HAY_CRYPTO:
+    # El resto de las pruebas no generan nada: solo necesitan que
+    # push_configurado() diga que si.
+    M.VAPID_PUBLICA, M.VAPID_PRIVADA = "pub-de-mentira", "priv-de-mentira"
+
+print("\n── El alta del aparato")
 ok(M.guardar_suscripcion({"correo":"x"}, {"endpoint":"https://fcm.test/1","keys":{"p256dh":"p","auth":"a"}}),
    "una suscripcion completa se guarda")
 ok(not M.guardar_suscripcion({"correo":"x"}, {"endpoint":"https://fcm.test/2"}),
@@ -105,10 +146,10 @@ noche = datetime(2026, 10, 12, 7, 0, tzinfo=timezone.utc)   # 03:00 en Caracas
 ok(not M.es_hora_de_molestar(noche), "a las 3 de la madrugada no se molesta")
 dia = datetime(2026, 10, 12, 18, 0, tzinfo=timezone.utc)    # 14:00 en Caracas
 ok(M.es_hora_de_molestar(dia), "a las 2 de la tarde si")
-guardada_pub = M.VAPID_PUBLICA
-M.VAPID_PUBLICA = ""
-ok(M.hacer_ronda_push(forzado=True) == 0, "sin las claves VAPID no se intenta siquiera")
-M.VAPID_PUBLICA = guardada_pub
+guardadas = (M.VAPID_PUBLICA, M.VAPID_PRIVADA, M.push_configurado)
+M.push_configurado = lambda: False
+ok(M.hacer_ronda_push(forzado=True) == 0, "sin claves VAPID no se intenta siquiera")
+M.VAPID_PUBLICA, M.VAPID_PRIVADA, M.push_configurado = guardadas
 
 print("\n── Cuando SI, y UNA sola vez")
 MANDADOS.clear()

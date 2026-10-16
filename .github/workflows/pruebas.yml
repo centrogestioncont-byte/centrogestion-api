@@ -29,6 +29,14 @@ jobs:
       - name: Fusion del estado
         run: python3 pruebas/fusion.py
 
+      # ARREGLO 151: que el servidor guarde TODO lo que la app le manda. Esta
+      # SI sale a internet, a proposito: descarga la app publicada y compara
+      # las listas de verdad, que es lo unico que caza el caso real —la app
+      # anade una clave y aqui nadie se entera—. Sin red no falla, lo dice y
+      # sigue, para que nadie la acabe desactivando.
+      - name: Las claves que el servidor guarda
+        run: python3 pruebas/claves.py
+
       # El lector del mercado: se le pone un tablon de mentira delante, asi que
       # no necesita internet. La llamada real a Binance no se puede probar aqui
       # -el CI no sale a la red- y por eso /mercado dice de cuantos anuncios

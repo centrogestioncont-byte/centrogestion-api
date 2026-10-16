@@ -398,6 +398,13 @@ MERGE_FIELDS = [
     "traspasos", "reposiciones", "gastos_eeuu", "deudas_paul",
     "movimientosCapital", "pagosSocios", "gananciaExtra", "gastos_socios",
     "inventarioUsdt_cerrado", "cierresMes", "capital", "ajustesSaldo",
+    # 16/10/2026 · ARREGLO 151. Las cinco llegaron con el apartamento
+    # (ARREGLO 134), la mercancia (143) y los aportes (146), y se quedaron
+    # fuera de las TRES listas de aca. Sin estar en MERGE_FIELDS la lista
+    # entrante REEMPLAZA a la guardada en vez de unirse registro a registro:
+    # anadir un flete en el telefono y vender en la PC se pisarian, que es
+    # justo lo que esas dos listas separadas existen para evitar.
+    "inmuebles", "inmCuotas", "articulos", "artGastos", "aportes",
 ]
 
 PODA_CATS = [
@@ -411,6 +418,13 @@ PODA_CATS = [
     # estar aca Y en _PODA_CATS del front: si solo una punta poda, el
     # servidor y los telefonos resuelven distinto el mismo conflicto.
     "capital",
+    # "cierresMes" entro en _PODA_CATS de la app el 16/09/2026, con el boton
+    # de reabrir el mes, y aqui NO. Es exactamente lo que el comentario de
+    # arriba advierte: si solo una punta poda, el servidor y los telefonos
+    # resuelven distinto el mismo conflicto. El sintoma es que reabrir un mes
+    # dura lo que tarda el siguiente guardado — el servidor devuelve el cierre
+    # podado por nadie y la pantalla vuelve a decir "Cerrado".
+    "cierresMes",
 ]
 
 DATA_KEYS = [
@@ -442,6 +456,24 @@ DATA_KEYS = [
     # ya existia NO habia forma de cambiarlo desde la app. La apertura, las
     # comisiones del banco, el % del sueldo, los socios: todo congelado.
     "_modCampos",
+    # 16/10/2026 · ARREGLO 151, y es el MISMO fallo del 08/10 con otras cinco
+    # claves. guardar_estado() y fusionar_estado() recorren ESTA lista: lo que
+    # no este aqui viaja del navegador al servidor y el servidor lo tira, sin
+    # un solo error y sin que nada lo diga.
+    #
+    # Medido el 16/10 comparando los dos exports de la dueña, el de la PC y el
+    # del telefono: la app manda 42 claves y el servidor guardaba 37. Lo que
+    # faltaba son MODULOS ENTEROS, no un detalle:
+    #   inmuebles, inmCuotas   el apartamento y sus 28 cuotas (ARREGLO 134)
+    #   articulos, artGastos   la mercancia que compra para revender (143)
+    #   aportes                su sueldo del otro trabajo (146/147)
+    #
+    # El sintoma con el que se encontro: la PC tenia la maquina de 210 y el
+    # telefono no, y Actualizar no la traia nunca — porque en el servidor no
+    # estaba. Esos tres modulos vivian SOLO en el navegador de la PC: no
+    # estaban en Mongo, no entraban en la copia automatica (ARREGLO 103) y
+    # limpiar el cache se los habria llevado.
+    "inmuebles", "inmCuotas", "articulos", "artGastos", "aportes",
 ]
 
 # ── Claves de config que viajan JUNTAS ───────────────────────────────────
@@ -451,8 +483,13 @@ DATA_KEYS = [
 # lista que _MERGE_BLOQUES en el navegador: las dos puntas tienen que
 # resolver igual el mismo conflicto.
 MERGE_BLOQUES = {
+    # "aperturaSinInteres" entra el 16/10/2026 (ARREGLO 149 de la app). Dice
+    # si el monto guardado ya viene SIN el interes pendiente de los prestamos,
+    # asi que un monto sin su bandera no se puede interpretar: fuera del
+    # bloque, la fusion podria dejar el monto de un aparato con la bandera del
+    # otro y el interes se descontaria dos veces, o ninguna.
     "config": [["aperturaUsdt", "aperturaFecha", "aperturaSaldos",
-                "aperturaTs", "aperturaBase"]],
+                "aperturaTs", "aperturaBase", "aperturaSinInteres"]],
 }
 
 RENUMERAR = ("brl", "vzla", "eeuu")
@@ -1172,6 +1209,30 @@ def leer_estado():
         else:
             estado[doc["_id"]] = doc.get("v")
     return estado, ts
+
+
+def claves_ignoradas(entrante):
+    """Las claves de datos que el aparato manda y este servidor NO guarda.
+
+    ARREGLO 151 (16/10/2026). Esto ya ha pasado DOS veces —el 08/10 con
+    histApertura, histComp y mapaBinance, y hoy con los cinco modulos nuevos—
+    y las dos veces el sintoma fue el mismo: nada. La clave viaja, el servidor
+    la tira porque no esta en DATA_KEYS, contesta 200, y el dato se queda
+    viviendo solo dentro de un navegador hasta que alguien compara dos
+    exports a mano.
+
+    Un fallo mudo cuesta una tarde (es la regla que la app ya aprendio con la
+    lectura de mercado). Asi que ahora se dice: van en la respuesta del
+    guardado y en el registro del servidor, y la proxima vez que alguien
+    anada una clave a la app y se olvide de aqui, se ve en el acto.
+
+    Se ignoran las que empiezan por "_" salvo las que SI son infraestructura
+    de la fusion, y las dos claves de sobre (`estado`, `_ts`): ninguna de esas
+    es un dato que se pierda."""
+    if not isinstance(entrante, dict):
+        return []
+    fuera = set(DATA_KEYS) | {"estado", "_ts", "_version", "_exportado", "_dispositivo"}
+    return sorted(k for k in entrante if k not in fuera)
 
 
 def guardar_estado(nuevo, previo, ts):
@@ -3049,12 +3110,19 @@ class Manejador(BaseHTTPRequestHandler):
                                      "sin permiso para: " + ", ".join(rechazadas))
                 except PyMongoError:
                     pass
+            # ARREGLO 151: lo que este servidor no sabe guardar se DICE. Ver
+            # claves_ignoradas(): callarlo es lo que dejo tres modulos enteros
+            # viviendo solo dentro de un navegador.
+            ignoradas = claves_ignoradas(entrante)
+            if ignoradas:
+                print("[estado] claves que este servidor NO guarda: " + ", ".join(ignoradas), flush=True)
             return self._responder(200, {
                 "ok": True,
                 "estado": fusionado,
                 "_ts": ts_nuevo,
                 "clavesEscritas": escritas,
                 "clavesRechazadas": rechazadas,
+                "clavesIgnoradas": ignoradas,
             })
 
         if len(partes) == 2 and partes[0] == "usuarios":

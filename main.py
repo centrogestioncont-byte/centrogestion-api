@@ -405,6 +405,11 @@ MERGE_FIELDS = [
     # anadir un flete en el telefono y vender en la PC se pisarian, que es
     # justo lo que esas dos listas separadas existen para evitar.
     "inmuebles", "inmCuotas", "articulos", "artGastos", "aportes",
+    # 23/10/2026 · ARREGLO 175 (PGDAS-D de la app). Competencias
+    # declaradas por mes: una por mesKey. Se fusiona registro a registro
+    # para que marcar una desde el telefono no pise las anteriores
+    # guardadas en la PC.
+    "pgdasHistorial",
 ]
 
 PODA_CATS = [
@@ -425,6 +430,9 @@ PODA_CATS = [
     # dura lo que tarda el siguiente guardado — el servidor devuelve el cierre
     # podado por nadie y la pantalla vuelve a decir "Cerrado".
     "cierresMes",
+    # ARREGLO 175 · PGDAS-D declaradas (igual que cierresMes: si la poda
+    # vive solo en una punta, el otro aparato devuelve la fila podada).
+    "pgdasHistorial",
 ]
 
 DATA_KEYS = [
@@ -474,6 +482,10 @@ DATA_KEYS = [
     # estaban en Mongo, no entraban en la copia automatica (ARREGLO 103) y
     # limpiar el cache se los habria llevado.
     "inmuebles", "inmCuotas", "articulos", "artGastos", "aportes",
+    # 23/10/2026 · ARREGLO 175 (PGDAS-D de la app). Sin esto la lista
+    # viajaria del navegador al servidor y el servidor la tiraria con
+    # 200 silencioso — ha pasado dos veces (08/10 y 16/10).
+    "pgdasHistorial",
 ]
 
 # ── Claves de config que viajan JUNTAS ───────────────────────────────────
@@ -3283,3 +3295,4 @@ if __name__ == "__main__":
     servidor = ThreadingHTTPServer(("0.0.0.0", puerto), Manejador)
     print("API escuchando en el puerto %d" % puerto, flush=True)
     servidor.serve_forever()
+

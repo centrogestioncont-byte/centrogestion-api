@@ -102,13 +102,15 @@ con_tablon([
 r = tasa("BRL", "BUY", 1000)
 ok(r is not None and r["anuncios"] == 2,
    "solo cuentan los anuncios que aceptan su monto", r)
-ok(r and abs(r["tasa"] - 5.11) < 1e-9,
-   "y el precio es la MEDIANA de esos, no el mejor de la lista", r and r["tasa"])
+# ARREGLO 182 · sus palabras: "la tasa más conveniente para mí según sea
+# compra o venta". BUY = ella compra USDT, paga reales -> MINIMO (paga menos).
+ok(r and abs(r["tasa"] - 5.10) < 1e-9,
+   "y el precio es el MINIMO (más conveniente al comprar)", r and r["tasa"])
 
-# Con tres, la mediana es la del medio.
+# Con tres BUY, el minimo (no la mediana).
 con_tablon([anuncio(5.10, 1, 9999), anuncio(5.12, 1, 9999), anuncio(5.30, 1, 9999)])
 r = tasa("BRL", "BUY", 1000)
-ok(r and r["tasa"] == 5.12, "con tres anuncios, el del medio", r and r["tasa"])
+ok(r and r["tasa"] == 5.10, "con tres anuncios BUY, el minimo", r and r["tasa"])
 
 print("\n== Un anuncio sin limites NO se supone bueno ==")
 # Sin minimo/maximo no hay forma de saber si acepta su monto. Contarlo seria
@@ -489,7 +491,8 @@ con_tablon([anuncio(950, 1000, 999999), anuncio(957, 1000, 999999),
 r = tasa("VES", "SELL", 112000)
 ok(r and r["monto"] == 112000 and "montoPedido" not in r,
    "si su monto SI se puede tomar, no se baja ni se marca nada", r)
-ok(r and r["tasa"] == 957, "y el precio sigue siendo la mediana", r)
+# ARREGLO 182 · SELL = ella vende USDT, recibe bolivares -> MAXIMO (recibe mas).
+ok(r and r["tasa"] == 960, "y el precio es el MAXIMO (más conveniente al vender)", r)
 
 print("\n== Un lado vacio se vuelve a pedir UNA vez, con la pregunta simple ==")
 vistas = []
@@ -665,6 +668,55 @@ ok(c2.get("fiat") == "BRL" and c2.get("tradeType") == "BUY" and c2.get("asset") 
 cab2 = {k.lower(): v for k, v in capturado.get("cabeceras", {}).items()}
 ok("Mozilla" in cab2.get("user-agent", ""),
    "y con las mismas cabeceras: se prueba el cuerpo, no las dos cosas a la vez", cab2.get("user-agent"))
+
+# ARREGLO 182 · ignorar los promocionados y la mas conveniente de los 6 primeros.
+print("\n== ARREGLO 182 · promocionados fuera, la mas conveniente ==")
+
+# BRL BUY con un promocionado inflado al principio (Will-P2P: 5.265 vs mercado real 5.02).
+con_tablon([anuncio(5.265, 500, 999999), anuncio(5.021, 1000, 46400),
+            anuncio(5.022, 5000, 104797), anuncio(5.025, 1000, 50000),
+            anuncio(5.030, 1000, 50000), anuncio(5.028, 1000, 50000)])
+r = tasa("BRL", "BUY", 1000)
+ok(r and abs(r["tasa"] - 5.021) < 1e-9,
+   "BUY: el minimo despues de descartar el promocionado (5.265 fuera)", r)
+ok(r and r.get("promoDescartados") == 1,
+   "y lo dice: 1 promocionado descartado", r)
+
+# VES SELL con un promocionado deflactado (MR-SIRIUS 953.989 vs mercado 1.005.500).
+con_tablon([anuncio(953989, 20000, 4000000), anuncio(1006000, 15000, 36450000),
+            anuncio(1005500, 7000000, 36000000), anuncio(1005400, 100000, 500000),
+            anuncio(1005800, 100000, 500000), anuncio(1005600, 100000, 500000)])
+r = tasa("VES", "SELL", 112000)
+ok(r and r["tasa"] == 1006000,
+   "SELL: el maximo despues de descartar el promocionado deflactado", r)
+
+# VES BUY con un promocionado inflado (Themorales 1.055.000 vs mercado 1.004.600).
+con_tablon([anuncio(1055000, 40000, 3800000), anuncio(1004500, 1000000, 7500000),
+            anuncio(1004700, 1000000, 2506736), anuncio(1004600, 100000, 500000),
+            anuncio(1004800, 100000, 500000), anuncio(1004500, 100000, 500000)])
+r = tasa("VES", "BUY", 112000)
+ok(r and r["tasa"] == 1004500,
+   "VES BUY: el minimo despues de descartar el promocionado inflado", r)
+
+# Si TODOS los 6 primeros son parecidos (no hay promocionado), no se filtra.
+con_tablon([anuncio(5.020, 1, 999999), anuncio(5.021, 1, 999999),
+            anuncio(5.022, 1, 999999), anuncio(5.023, 1, 999999),
+            anuncio(5.024, 1, 999999), anuncio(5.025, 1, 999999)])
+r = tasa("BRL", "BUY", 1000)
+ok(r and r["tasa"] == 5.020 and r.get("promoDescartados") == 0,
+   "sin promocionados: 0 descartados, el minimo tal cual", r)
+
+# Solo se miran los 6 PRIMEROS, no el tablon entero.
+con_tablon([anuncio(5.100, 1, 999999)] * 6 + [anuncio(5.000, 1, 999999)] * 5)
+r = tasa("BRL", "BUY", 1000)
+ok(r and r["tasa"] == 5.100,
+   "solo los 6 primeros: el anuncio 7+ con mejor precio no cuenta", r)
+
+# Con 1-2 precios no filtra (la mediana no es fiable).
+con_tablon([anuncio(5.100, 1, 999999), anuncio(5.300, 1, 999999)])
+r = tasa("BRL", "BUY", 1000)
+ok(r and r["tasa"] == 5.100,
+   "con 2 precios no se filtra promocionado: no hay mediana fiable", r)
 
 print("\n" + ("FALLARON %d prueba(s)" % len(fallos) if fallos else "Todo en orden."))
 sys.exit(1 if fallos else 0)

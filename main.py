@@ -1983,10 +1983,30 @@ MERCADO_CACHE_SEG = 300     # 5 min: ella abre la pantalla muchas veces al dia
 # preguntas a Binance, y poco para que pulsar el boton signifique algo.
 MERCADO_CACHE_FALLO_SEG = 20
 MERCADO_MAX_ANUNCIOS = 10   # de los que pasan el filtro, los 10 mejores
+# ARREGLO 182: ella pidio los SEIS PRIMEROS del tablon (los que publica el
+# API de Binance, en su orden) y la mas conveniente de esos.
+MERCADO_PRIMEROS = 6
 # Cuantos anuncios tienen que aceptar un monto para que valga como "el mercado".
 # Leer UNO es lo mismo que leer "el mejor precio del tablon", que es justo lo
 # que no sirve: publicar contra un precio que solo da una persona.
 MERCADO_MIN_ANUNCIOS = 3
+# ARREGLO 182: desviacion maxima permitida respecto a la mediana del RESTO
+# para considerar un precio como "real" (no promocionado). Los promocionados
+# en Binance P2P son anuncios inflados (comprar USDT) o deflactados (vender
+# USDT) que se ponen primero para enganchar. 4% los captura sin depender de
+# un campo 'isPromoted' que Binance cambia sin avisar.
+#
+# La mediana se calcula EXCLUYENDO el candidato, para que el propio
+# promocionado no la mueva hacia si mismo y acabe por debajo del umbral:
+# con Will-P2P 5.265 y resto 5.021-5.030, la mediana del conjunto entero
+# da 5.0265 (4.74% de desv del 5.265, por debajo de un 5% directo); la
+# mediana del resto da 5.025 (4.78%) pero con 4% ya cae claro fuera.
+#
+# Medido con sus capturas del 24/10, umbral 4% sobre mediana-sin-el-mismo:
+#   VES BUY : Themorales 1.055.000 vs ~1.004.600 -> 5.0% fuera   descarta
+#   VES SELL: MR-SIRIUS 953.989  vs ~1.005.500 -> 5.1% fuera    descarta
+#   BRL BUY : Will-P2P 5.265      vs ~5.025     -> 4.8% fuera    descarta
+MERCADO_PROMO_DESVIACION = 0.04
 # Las dos direcciones del tablon, para el sondeo de mas abajo.
 MERCADO_OTRO_LADO = {"BUY": "SELL", "SELL": "BUY"}
 
@@ -2041,6 +2061,62 @@ def _mediana(valores):
     v = sorted(valores)
     m = len(v) // 2
     return v[m] if len(v) % 2 else (v[m - 1] + v[m]) / 2.0
+
+
+def _descartar_promocionados(precios, tolerancia=None):
+    """Quita los promocionados (precios que se alejan mucho de la mediana).
+
+    ARREGLO 182: sus palabras del 24/10 fueron "que ignore los promocionales
+    esas son tasas que no son reales". Los promocionados en Binance P2P son
+    anuncios inflados o deflactados que se ponen primero del tablon para
+    enganchar. En las capturas:
+      VES BUY : Themorales 1.055.000 (promocionado) vs resto a ~1.004.600
+      VES SELL: MR-SIRIUS 953.989 (promocionado) vs resto a ~1.005.750
+      BRL BUY : Will-P2P 5.265 (promocionado) vs resto a ~5.022
+
+    No se mira el campo 'isPromoted' de Binance porque cambia sin avisar.
+    La desviacion de la mediana captura el mismo problema sin depender de
+    como se llame el campo hoy.
+
+    Si quedan muy pocos precios la mediana no es fiable y no se filtra, para
+    no acabar con una lista vacia.
+    """
+    if tolerancia is None:
+        tolerancia = MERCADO_PROMO_DESVIACION
+    if len(precios) <= 2:
+        return list(precios)
+    sin_promo = []
+    for i, p in enumerate(precios):
+        resto = precios[:i] + precios[i + 1:]
+        med_sin_el = _mediana(resto)
+        if med_sin_el is None or med_sin_el <= 0:
+            sin_promo.append(p)
+            continue
+        if abs(p - med_sin_el) / med_sin_el <= tolerancia:
+            sin_promo.append(p)
+        # si no, es outlier -> se descarta
+    # Si el filtro se come casi todo, es que la mediana no es fiable (muchos
+    # promocionados juntos). En ese caso devolver lo original es menos malo:
+    # ella ve el numero y decide.
+    if len(sin_promo) < 2:
+        return list(precios)
+    return sin_promo
+
+
+def _mas_conveniente(precios, tipo):
+    """La tasa mas CONVENIENTE para ella segun el sentido del P2P.
+
+    ARREGLO 182: ella pidio "la tasa mas conveniente para mi segun sea
+    compra o venta".
+      BUY  = ella compra USDT (paga reales/bolivares) -> MINIMO (paga menos)
+      SELL = ella vende USDT (recibe reales/bolivares) -> MAXIMO (recibe mas)
+
+    Antes aqui iba la mediana. Con los promocionados ya fuera, el extremo
+    de los que quedan es su mejor tasa real.
+    """
+    if not precios:
+        return None
+    return min(precios) if tipo == "BUY" else max(precios)
 
 
 def _motivo_corto(v, tope=70):
@@ -2369,9 +2445,20 @@ def _leer_mercado(fiat, tipo, monto):
     if not precios:
         return None, ("de los %d anuncios de %s, ninguno acepta %s"
                       % (len(crudo), fiat, _monto_legible(monto)))
-    precios = precios[:MERCADO_MAX_ANUNCIOS]
-    dato = {"tasa": round(_mediana(precios), 4),
-            "anuncios": len(precios), "monto": usado}
+    # ARREGLO 182 · tres cosas, en orden:
+    # 1. SOLO los 6 primeros del tablon (el orden que publica Binance). Mas
+    #    alla el mercado se diluye en anuncios de muy bajo volumen o viejos.
+    # 2. QUITAR los promocionados (desviacion > 5% de la mediana). Son tasas
+    #    infladas o deflactadas que se ponen para enganchar, no son reales.
+    # 3. De los que quedan, la MAS CONVENIENTE segun el sentido:
+    #       BUY  -> minimo (ella paga menos por USDT)
+    #       SELL -> maximo (ella recibe mas por USDT)
+    primeros = precios[:MERCADO_PRIMEROS]
+    sin_promo = _descartar_promocionados(primeros)
+    tasa_bruta = _mas_conveniente(sin_promo, tipo)
+    dato = {"tasa": round(tasa_bruta, 4),
+            "anuncios": len(sin_promo), "monto": usado,
+            "promoDescartados": len(primeros) - len(sin_promo)}
     # Solo cuando NO es el suyo: asi la app puede decirlo sin tener que
     # comparar por su cuenta, y una lectura normal no arrastra un campo de mas.
     if usado != monto:

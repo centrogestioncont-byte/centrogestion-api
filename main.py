@@ -27,6 +27,7 @@ import os
 import secrets
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.error import HTTPError, URLError
@@ -1963,7 +1964,11 @@ SPOT_POR_MONEDA = {"BRL": "USDTBRL"}
 # ofrecer sin perder— eso vale de sobra. Lo que no vale es callar de donde
 # salio, y por eso cada lectura trae su "fuente" y la pantalla la enseña.
 #
-# El orden importa: Binance primero, porque es donde ella opera de verdad.
+# ARREGLO 186 · Las tres de USDT se lanzan EN PARALELO (ver _precio_spot) y
+# gana la primera que conteste - sus palabras del 26/10: "cambia las posiciones
+# segun la que responda mas rapido para que sirva al momento de calcular".
+# El orden en esta lista no decide ya quien pregunta primero (lo decide quien
+# conteste primero); solo lo ensena la pantalla al listar los fallos.
 FUENTES_BRL = [
     ("Binance", BINANCE_SPOT + "?symbol=USDTBRL"),
     ("CoinGecko", "https://api.coingecko.com/api/v3/simple/price"
@@ -1971,6 +1976,17 @@ FUENTES_BRL = [
     ("Mercado Bitcoin", "https://api.mercadobitcoin.net/api/v4/tickers"
                         "?symbols=USDT-BRL"),
 ]
+# ARREGLO 186 · AwesomeAPI como RED DE RESPALDO. Es publica, sin token, y es
+# lo que Google/Morningstar usan por detras: una tasa USD/BRL en vivo
+# (su captura del 26/10: 5,42 R$/USD cuando el P2P de USDT estaba 5,366). La
+# diferencia USDT vs USD ronda el 1% - menos preciso que una fuente USDT, pero
+# util cuando las tres USDT caen a la vez: mejor publicar con un numero del
+# dia que caer a su ultima operacion (5,02 del 20/10 - que fue el fallo
+# reportado el 26/10). Se marca con tipo:"usd" en la respuesta para que la
+# app lo distinga: el ARREGLO 183 aplica 1% al spot USDT, pero USD va 1% POR
+# ENCIMA del USDT P2P hoy, asi que la app le aplica -1% para bajarlo al P2P.
+# Decision suya del 26/10: "dale B" (margen -1% con AwesomeAPI).
+AWESOMEAPI_USD_BRL = "https://economia.awesomeapi.com.br/last/USD-BRL"
 # Mas corto que el del P2P: son tres seguidas, y si las tres se cuelgan la
 # pantalla se queda esperando. Con 4s el peor caso son 12, no 18.
 MERCADO_ESPERA_FUENTE = 4
@@ -2148,12 +2164,13 @@ MERCADO_CABECERAS_SPOT = {
 def _precio_de(datos):
     """El precio dentro de la respuesta, venga en la forma que venga.
 
-    Cada sitio lo envuelve distinto y no hay contrato: se prueban las tres
-    formas conocidas y si ninguna encaja se devuelve nada, en vez de adivinar.
+    Cada sitio lo envuelve distinto y no hay contrato: se prueban las formas
+    conocidas y si ninguna encaja se devuelve nada, en vez de adivinar.
 
       Binance          {"price": "5.27"}
       CoinGecko        {"tether": {"brl": 5.27}}
       Mercado Bitcoin  [{"pair": "USDT-BRL", "last": "5.27"}]
+      AwesomeAPI       {"USDBRL": {"bid": "5.42", "ask": "5.43", ...}}
     """
     if isinstance(datos, list):
         datos = datos[0] if datos and isinstance(datos[0], dict) else None
@@ -2162,9 +2179,17 @@ def _precio_de(datos):
     directo = _num_o_none(datos.get("price")) or _num_o_none(datos.get("last"))
     if directo:
         return directo
+    # CoinGecko envuelve en 'tether'; AwesomeAPI envuelve en 'USDBRL'. Son
+    # dos sitios distintos y la pantalla los dice distinto, pero el precio
+    # dentro es un numero y se lee igual.
     dentro = datos.get("tether")
     if isinstance(dentro, dict):
         return _num_o_none(dentro.get("brl"))
+    dentro = datos.get("USDBRL")
+    if isinstance(dentro, dict):
+        # AwesomeAPI da bid (compra) y ask (venta). Usamos bid: es a lo que
+        # alguien COMPRA USD en Brasil, mas conservador que ask para su suelo.
+        return _num_o_none(dentro.get("bid")) or _num_o_none(dentro.get("ask"))
     return None
 
 
@@ -2191,23 +2216,62 @@ def _pedir_precio(url):
 
 
 def _precio_spot(fiat):
-    """El precio de 1 USDT en esa moneda, del primer sitio que conteste.
+    """El precio de 1 USDT en esa moneda.
 
-    Devuelve ({tasa, fuente}, "") o (None, motivo con lo que dijo CADA uno).
-    No lleva anuncios ni monto: aqui no hay anuncio que aceptar, el precio es
-    uno solo.
+    ARREGLO 186: las tres fuentes de USDT se lanzan EN PARALELO y gana la
+    primera que conteste con un precio bueno - sus palabras del 26/10: "la
+    que responda mas rapido para que sirva al momento de calcular". Antes se
+    probaban una por una: con Binance BR respondiendo 451 al instante no
+    costaba casi nada, pero con una fuente lenta o colgada se iba el
+    MERCADO_ESPERA_FUENTE entero antes de pasar a la siguiente.
+
+    Si las tres fallan, se cae a AwesomeAPI (USD/BRL): es menos precisa que
+    USDT (hoy USD = 5,42 y USDT = 5,37, ~1% arriba) pero cualquier numero
+    del dia es mejor que la ultima operacion suya de hace una semana. La
+    respuesta marca tipo:"usd" para que la app aplique su margen distinto.
+
+    Devuelve ({tasa, fuente, tipo}, "") o (None, motivo con lo que dijo CADA
+    una). No lleva anuncios ni monto: aqui no hay anuncio que aceptar, el
+    precio es uno solo.
     """
     if fiat != "BRL":
         return None, "no hay mercado de %s fuera del P2P" % fiat
-    fallos = []
-    for nombre, url in FUENTES_BRL:
-        precio, fallo = _pedir_precio(url)
-        if precio:
-            return {"tasa": round(precio, 4), "fuente": nombre}, ""
-        fallos.append("%s %s" % (nombre, fallo))
-    # Se cuentan TODAS, no solo la primera: cual conteste y cual no es
-    # justamente lo que hay que saber para decidir que hacer despues.
-    return None, " · ".join(fallos)
+    # Las tres de USDT corren en paralelo. ThreadPoolExecutor con tres hilos:
+    # una por fuente, para que la respuesta de una no espere a la otra.
+    fallos = {}
+    ganador = None
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        futuros = {pool.submit(_pedir_precio, url): nombre
+                   for nombre, url in FUENTES_BRL}
+        for fut in as_completed(futuros, timeout=MERCADO_ESPERA_FUENTE + 1):
+            nombre = futuros[fut]
+            try:
+                precio, fallo = fut.result()
+            except Exception as err:
+                precio, fallo = None, "hilo: %s" % _motivo_corto(str(err), 40)
+            if precio:
+                ganador = {"tasa": round(precio, 4),
+                           "fuente": nombre, "tipo": "usdt"}
+                break  # as_completed deja los otros vivos, no pasa nada
+            fallos[nombre] = fallo
+    if ganador:
+        return ganador, ""
+    # Las que no habian terminado antes del ganador no entraron en 'fallos'.
+    # Si llegamos aqui, es que ninguna gano - 'fallos' lleva al menos las que
+    # devolvieron algo; completamos el motivo con las que no.
+    for nombre, _ in FUENTES_BRL:
+        if nombre not in fallos:
+            fallos[nombre] = "no contesto"
+    motivo_usdt = " · ".join("%s %s" % (n, fallos[n]) for n, _ in FUENTES_BRL)
+    # Red de respaldo: AwesomeAPI (USD/BRL). No es USDT, pero USD en Brasil se
+    # mueve con el real a tiempo real y el servidor publico de AwesomeAPI
+    # casi nunca cae - es lo que Morningstar/Google usan por detras. Marca
+    # tipo:"usd" para que la app no le aplique el margen P2P sobre USDT.
+    precio, fallo = _pedir_precio(AWESOMEAPI_USD_BRL)
+    if precio:
+        return ({"tasa": round(precio, 4),
+                 "fuente": "AwesomeAPI (USD)", "tipo": "usd"}, "")
+    return None, "%s · AwesomeAPI (USD) %s" % (motivo_usdt, fallo)
 
 
 def _porque_vacio(datos, fiat):

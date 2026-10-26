@@ -193,51 +193,64 @@ def con_fuentes(respuestas):
     return visitadas
 
 
-# Las tres formas en que cada sitio envuelve el precio.
+# Las formas en que cada sitio envuelve el precio.
 ok(main._precio_de({"price": "5.27"}) == 5.27, "se entiende la forma de Binance")
 ok(main._precio_de({"tether": {"brl": 5.2713}}) == 5.2713,
    "y la de CoinGecko, que lo mete dentro")
 ok(main._precio_de([{"pair": "USDT-BRL", "last": "5.28"}]) == 5.28,
    "y la de Mercado Bitcoin, que manda una lista")
+# ARREGLO 186 · AwesomeAPI es la red de respaldo: USD/BRL en vez de USDT/BRL,
+# util cuando las tres USDT caen a la vez.
+ok(main._precio_de({"USDBRL": {"bid": "5.42", "ask": "5.43"}}) == 5.42,
+   "y la de AwesomeAPI, que da bid/ask - se usa bid, mas conservador")
 ok(main._precio_de({"algo": "otra cosa"}) is None,
    "y una forma que no se conoce no se adivina")
 
-# Binance contesta -> se queda con Binance y no molesta a los demas.
-visitadas = con_fuentes({"binance": b'{"price":"5.27"}'})
-r, motivo = main._precio_spot("BRL")
-main.urlopen = _urlopen_guardado
-ok(r and r["tasa"] == 5.27 and r["fuente"] == "Binance",
-   "con Binance sano, el precio es el suyo", r)
-ok(len(visitadas) == 1, "y a los otros sitios ni se les pregunta", visitadas)
-
-# Binance da 451 -> sigue al siguiente.
+# ARREGLO 186 · Las tres de USDT corren en PARALELO - gana la primera que
+# conteste. Antes se probaban en orden: con una fuente lenta se perdia el
+# timeout entero antes de pasar a la siguiente. Ahora no.
 visitadas = con_fuentes({
-    "binance": HTTPError("u", 451, "Unavailable For Legal Reasons", {}, None),
+    "binance": b'{"price":"5.27"}',
     "coingecko": b'{"tether":{"brl":5.2713}}',
-})
-r, motivo = main._precio_spot("BRL")
-main.urlopen = _urlopen_guardado
-ok(r and r["tasa"] == 5.2713 and r["fuente"] == "CoinGecko",
-   "si Binance bloquea por pais, se va al siguiente sitio", r)
-ok(any("coingecko" in u for u in visitadas), "que si se le pregunta", visitadas)
-
-# Los dos primeros caen -> el tercero.
-visitadas = con_fuentes({
-    "binance": HTTPError("u", 451, "x", {}, None),
-    "coingecko": HTTPError("u", 429, "x", {}, None),
     "mercadobitcoin": b'[{"pair":"USDT-BRL","last":"5.29"}]',
 })
 r, motivo = main._precio_spot("BRL")
 main.urlopen = _urlopen_guardado
-ok(r and r["tasa"] == 5.29 and r["fuente"] == "Mercado Bitcoin",
-   "y si caen dos, el tercero", r)
+ok(r is not None and r["tipo"] == "usdt",
+   "con cualquiera sana, el precio es de USDT - no AwesomeAPI (USD)", r)
+ok(r["tasa"] in (5.27, 5.2713, 5.29),
+   "y es una de las tres - la que gano la carrera", r)
 
-# Si caen las tres, se dice lo que contesto CADA una: eso es lo que decide que
-# hacer despues, y el 451 hay que poder leerlo tal cual.
+# Binance da 451 - una de las otras dos USDT gana.
+visitadas = con_fuentes({
+    "binance": HTTPError("u", 451, "Unavailable For Legal Reasons", {}, None),
+    "coingecko": b'{"tether":{"brl":5.2713}}',
+    "mercadobitcoin": b'[{"pair":"USDT-BRL","last":"5.29"}]',
+})
+r, motivo = main._precio_spot("BRL")
+main.urlopen = _urlopen_guardado
+ok(r and r["tasa"] in (5.2713, 5.29) and r["tipo"] == "usdt",
+   "si Binance bloquea, gana otra de USDT (sigue siendo tipo usdt)", r)
+
+# Las tres USDT caen -> AwesomeAPI (red de respaldo). Es el caso del 26/10.
+visitadas = con_fuentes({
+    "binance": HTTPError("u", 451, "x", {}, None),
+    "coingecko": HTTPError("u", 429, "x", {}, None),
+    "mercadobitcoin": HTTPError("u", 500, "x", {}, None),
+    "awesomeapi": b'{"USDBRL":{"bid":"5.42","ask":"5.43"}}',
+})
+r, motivo = main._precio_spot("BRL")
+main.urlopen = _urlopen_guardado
+ok(r and r["tasa"] == 5.42 and r["fuente"] == "AwesomeAPI (USD)" and r["tipo"] == "usd",
+   "si caen las tres USDT, AwesomeAPI (USD) toma el relevo", r)
+
+# Si caen las tres USDT Y AwesomeAPI, se dice lo que contesto CADA una: eso
+# es lo que decide que hacer despues, y el 451 hay que poder leerlo tal cual.
 con_fuentes({
     "binance": HTTPError("u", 451, "x", {}, None),
     "coingecko": HTTPError("u", 403, "x", {}, None),
     "mercadobitcoin": HTTPError("u", 500, "x", {}, None),
+    "awesomeapi": HTTPError("u", 502, "x", {}, None),
 })
 r, motivo = main._precio_spot("BRL")
 main.urlopen = _urlopen_guardado
@@ -245,6 +258,8 @@ ok(r is None, "sin ninguna, no se inventa precio", r)
 ok("Binance respondio 451" in motivo, "y se lee el 451 tal cual", motivo)
 ok("CoinGecko respondio 403" in motivo and "Mercado Bitcoin respondio 500" in motivo,
    "con lo que dijo cada uno, no solo el primero", motivo)
+ok("AwesomeAPI" in motivo and "502" in motivo,
+   "y tambien lo que contesto AwesomeAPI, para no esconder que se intento", motivo)
 
 # Bolivares no tiene mercado fuera del P2P.
 r, motivo = main._precio_spot("VES")

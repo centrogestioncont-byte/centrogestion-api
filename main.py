@@ -487,6 +487,12 @@ DATA_KEYS = [
     # viajaria del navegador al servidor y el servidor la tiraria con
     # 200 silencioso — ha pasado dos veces (08/10 y 16/10).
     "pgdasHistorial",
+    # 10/11/2026 · ARREGLO 240 de la app (📒 Contabilidad). La foto del capital
+    # de cada dia, indexada por fecha: con ella la app dice "con cuanto cerraste
+    # el dia". Va SOLO aqui, como histBalance: aqui se guarda entera y la union
+    # por fecha la hace la app (_MERGE_HISTORIAL). Sin esta linea viajaria y se
+    # tiraria con un 200 — la tercera vez seria (08/10, 16/10).
+    "histCapital",
 ]
 
 # ── Claves de config que viajan JUNTAS ───────────────────────────────────

@@ -406,6 +406,10 @@ MERGE_FIELDS = [
     # anadir un flete en el telefono y vender en la PC se pisarian, que es
     # justo lo que esas dos listas separadas existen para evitar.
     "inmuebles", "inmCuotas", "articulos", "artGastos", "aportes",
+    # 10/11/2026 · las parcelas de la mercancia (ARREGLO 226 de la app). La
+    # app la une registro a registro desde el 226; aqui faltaba, asi que la
+    # lista entrante habria reemplazado a la guardada.
+    "artCuotas",
     # 23/10/2026 · ARREGLO 175 (PGDAS-D de la app). Competencias
     # declaradas por mes: una por mesKey. Se fusiona registro a registro
     # para que marcar una desde el telefono no pise las anteriores
@@ -487,6 +491,19 @@ DATA_KEYS = [
     # viajaria del navegador al servidor y el servidor la tiraria con
     # 200 silencioso — ha pasado dos veces (08/10 y 16/10).
     "pgdasHistorial",
+    # 10/11/2026 · artCuotas, las parcelas de la mercancia (ARREGLO 226 de la
+    # app). La app la manda desde el 226 y aqui NO estaba: se tiraba con un
+    # 200, la TERCERA vez del mismo fallo (08/10, 16/10). Lo cazo claves.py
+    # comparando contra la app: "se pierden: artCuotas". Lo ya registrado en
+    # parcelas vive solo en el navegador donde se registro hasta que ese
+    # aparato vuelva a guardar con este servidor desplegado.
+    "artCuotas",
+    # 10/11/2026 · ARREGLO 240 de la app (📒 Contabilidad). La foto del capital
+    # de cada dia, indexada por fecha: con ella la app dice "con cuanto cerraste
+    # el dia". Va SOLO aqui, como histBalance: aqui se guarda entera y la union
+    # por fecha la hace la app (_MERGE_HISTORIAL). Sin esta linea viajaria y se
+    # tiraria con un 200 — la tercera vez seria (08/10, 16/10).
+    "histCapital",
 ]
 
 # ── Claves de config que viajan JUNTAS ───────────────────────────────────

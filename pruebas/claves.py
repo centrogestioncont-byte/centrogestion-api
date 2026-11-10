@@ -78,12 +78,20 @@ def ok(condicion, mensaje, dato=None):
 # Van en DATA_KEYS (si no, no se guardan) Y en MERGE_FIELDS (si no, la lista
 # entrante REEMPLAZA a la guardada en vez de unirse registro a registro, y
 # dos aparatos se pisan). Las dos cosas, o el modulo sigue roto a medias.
-NUEVAS = ["inmuebles", "inmCuotas", "articulos", "artGastos", "aportes"]
+# artCuotas (las parcelas de la mercancia, ARREGLO 226 de la app) entra el
+# 10/11: la app la mandaba desde el 226 y el servidor la tiraba.
+NUEVAS = ["inmuebles", "inmCuotas", "articulos", "artGastos", "aportes", "artCuotas"]
 
-print("Los modulos del 134, el 143 y el 146 llegan al servidor")
+print("Los modulos del 134, el 143, el 146 y el 226 llegan al servidor")
 for k in NUEVAS:
     ok(k in main.DATA_KEYS,    k + " se GUARDA (DATA_KEYS)")
     ok(k in main.MERGE_FIELDS, k + " se UNE en vez de reemplazarse (MERGE_FIELDS)")
+
+# histCapital (ARREGLO 240 de la app) es un historial por fecha: se GUARDA,
+# pero NO va en MERGE_FIELDS — no es una lista con id. Como histBalance, aqui
+# se guarda entero y la union por fecha la hace la app.
+ok("histCapital" in main.DATA_KEYS, "histCapital se GUARDA (DATA_KEYS)")
+ok("histCapital" not in main.MERGE_FIELDS, "y no se trata como lista con id")
 
 print("\nY la apertura sigue viajando entera")
 # "aperturaSinInteres" (ARREGLO 149 de la app, 16/10) dice si el monto ya
